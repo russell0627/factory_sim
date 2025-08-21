@@ -2,6 +2,8 @@ import 'package:factory_sim/models/conveyor.dart';
 import 'package:factory_sim/models/machine.dart';
 import 'package:factory_sim/models/rail.dart';
 import 'package:factory_sim/models/train.dart';
+import 'package:factory_sim/models/enemy.dart';
+import 'package:factory_sim/models/player.dart';
 import 'package:factory_sim/models/pipe.dart';
 import 'package:factory_sim/models/factory_core.dart';
 import 'package:factory_sim/models/research.dart';
@@ -18,6 +20,10 @@ class GameState {
     required this.trains,
     required this.pipeGrid,
     required this.resourceGrid,
+    required this.pollutionGrid,
+    required this.player,
+    required this.enemyNests,
+    required this.enemies,
     required this.inventory,
     this.gameTick = 0,
     this.lastMessage,
@@ -26,6 +32,7 @@ class GameState {
     this.unlockedResearch = const {},
     this.powerCapacity = 0,
     this.powerDemand = 0,
+    this.nextEnemyId = 0,
     this.factoryCore,
   });
 
@@ -34,6 +41,10 @@ class GameState {
   final List<List<Rail?>> railGrid;
   final List<Train> trains;
   final List<List<Pipe?>> pipeGrid;
+  final List<List<int>> pollutionGrid;
+  final List<EnemyNest> enemyNests;
+  final Player player;
+  final List<Enemy> enemies;
   final List<List<ResourceType?>> resourceGrid;
   final Map<ResourceType, int> inventory;
   final int gameTick;
@@ -43,6 +54,7 @@ class GameState {
   final Set<ResearchType> unlockedResearch;
   final int powerCapacity;
   final int powerDemand;
+  final int nextEnemyId;
   final FactoryCoreState? factoryCore;
 
   GameState copyWith({
@@ -52,6 +64,10 @@ class GameState {
     List<Train>? trains,
     List<List<Pipe?>>? pipeGrid,
     List<List<ResourceType?>>? resourceGrid,
+    List<List<int>>? pollutionGrid,
+    List<EnemyNest>? enemyNests,
+    Player? player,
+    List<Enemy>? enemies,
     Map<ResourceType, int>? inventory,
     int? gameTick,
     String? lastMessage,
@@ -61,6 +77,7 @@ class GameState {
     Set<ResearchType>? unlockedResearch,
     int? powerCapacity,
     int? powerDemand,
+    int? nextEnemyId,
     FactoryCoreState? factoryCore,
   }) {
     return GameState(
@@ -70,6 +87,10 @@ class GameState {
       trains: trains ?? this.trains,
       pipeGrid: pipeGrid ?? this.pipeGrid,
       resourceGrid: resourceGrid ?? this.resourceGrid,
+      pollutionGrid: pollutionGrid ?? this.pollutionGrid,
+      player: player ?? this.player,
+      enemyNests: enemyNests ?? this.enemyNests,
+      enemies: enemies ?? this.enemies,
       inventory: inventory ?? this.inventory,
       gameTick: gameTick ?? this.gameTick,
       lastMessage: clearLastMessage ? null : lastMessage ?? this.lastMessage,
@@ -78,13 +99,14 @@ class GameState {
       unlockedResearch: unlockedResearch ?? this.unlockedResearch,
       powerCapacity: powerCapacity ?? this.powerCapacity,
       powerDemand: powerDemand ?? this.powerDemand,
+      nextEnemyId: nextEnemyId ?? this.nextEnemyId,
       factoryCore: factoryCore ?? this.factoryCore,
     );
   }
 
   @override
-  bool operator ==(Object other) => identical(this, other) || other is GameState && runtimeType == other.runtimeType && grid == other.grid && conveyorGrid == other.conveyorGrid && railGrid == other.railGrid && trains == other.trains && pipeGrid == other.pipeGrid && resourceGrid == other.resourceGrid && inventory == other.inventory && gameTick == other.gameTick && lastMessage == other.lastMessage && selectedTool == other.selectedTool && points == other.points && unlockedResearch == other.unlockedResearch && powerCapacity == other.powerCapacity && powerDemand == other.powerDemand && factoryCore == other.factoryCore;
-
+  bool operator ==(Object other) => identical(this, other) || other is GameState && runtimeType == other.runtimeType && grid == other.grid && conveyorGrid == other.conveyorGrid && railGrid == other.railGrid && trains == other.trains && pipeGrid == other.pipeGrid && pollutionGrid == other.pollutionGrid && enemyNests == other.enemyNests && enemies == other.enemies && resourceGrid == other.resourceGrid && inventory == other.inventory && gameTick == other.gameTick && lastMessage == other.lastMessage && selectedTool == other.selectedTool && points == other.points && unlockedResearch == other.unlockedResearch && powerCapacity == other.powerCapacity && powerDemand == other.powerDemand && nextEnemyId == other.nextEnemyId && factoryCore == other.factoryCore;
+  
   @override
-  int get hashCode => grid.hashCode ^ conveyorGrid.hashCode ^ railGrid.hashCode ^ trains.hashCode ^ pipeGrid.hashCode ^ resourceGrid.hashCode ^ inventory.hashCode ^ gameTick.hashCode ^ lastMessage.hashCode ^ selectedTool.hashCode ^ points.hashCode ^ unlockedResearch.hashCode ^ powerCapacity.hashCode ^ powerDemand.hashCode ^ factoryCore.hashCode;
+  int get hashCode => grid.hashCode ^ conveyorGrid.hashCode ^ railGrid.hashCode ^ trains.hashCode ^ pipeGrid.hashCode ^ pollutionGrid.hashCode ^ player.hashCode ^ enemyNests.hashCode ^ enemies.hashCode ^ resourceGrid.hashCode ^ inventory.hashCode ^ gameTick.hashCode ^ lastMessage.hashCode ^ selectedTool.hashCode ^ points.hashCode ^ unlockedResearch.hashCode ^ powerCapacity.hashCode ^ powerDemand.hashCode ^ nextEnemyId.hashCode ^ factoryCore.hashCode;
 }

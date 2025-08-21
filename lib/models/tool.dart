@@ -21,6 +21,8 @@ enum Tool {
   assembler,
   refinery,
   chemicalPlant,
+  wall,
+  gunTurret,
   droneStation,
   trainStop,
   storage,

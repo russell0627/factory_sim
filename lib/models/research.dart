@@ -12,6 +12,8 @@ enum ResearchType {
   factoryCoreConstruction,
   drones,
   automatedRailways,
+  military,
+  powerArmor,
 }
 
 /// Represents a single research item in the technology tree.
@@ -90,5 +92,17 @@ final Map<ResearchType, Research> allResearch = {
     description: 'Unlocks Rails, Train Stops, and Locomotives for high-throughput, long-distance transport.',
     cost: 800,
     prerequisites: {ResearchType.drones},
+  ),
+  ResearchType.military: const Research(
+    name: 'Military',
+    description: 'Unlocks Walls, Gun Turrets, and Ammunition production to defend your factory.',
+    cost: 300,
+    prerequisites: {ResearchType.powerGeneration},
+  ),
+  ResearchType.powerArmor: const Research(
+    name: 'Power Armor',
+    description: 'Unlocks the ability to craft and equip personal equipment, like the Exoskeleton.',
+    cost: 600,
+    prerequisites: {ResearchType.plastics},
   ),
 };

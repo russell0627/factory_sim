@@ -10,7 +10,9 @@ import 'package:factory_sim/models/drone.dart';
 import 'package:factory_sim/models/machine.dart';
 import 'package:factory_sim/models/resource.dart';
 import 'package:flutter/material.dart';
+import 'package:factory_sim/models/enemy.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/services.dart';
 
 import 'models/rail.dart';
 import 'models/train.dart';
@@ -63,202 +65,232 @@ class GamePage extends ConsumerWidget {
           ),
         ],
       ),
-      body: Row(
-        children: [
-          // Game Grid
-          Expanded(
-            flex: 3,
-            child: GridView.builder(
-              gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-                crossAxisCount: gameState.grid.isNotEmpty ? gameState.grid[0].length : 1,
-              ),
-              itemCount: gameState.grid.length * (gameState.grid.isNotEmpty ? gameState.grid[0].length : 0),
-              itemBuilder: (context, index) {
-                final row = index ~/ (gameState.grid.isNotEmpty ? gameState.grid[0].length : 1);
-                final col = index % (gameState.grid.isNotEmpty ? gameState.grid[0].length : 1);
-                final rail = gameState.railGrid[row][col];
-                final pipe = gameState.pipeGrid[row][col];
+      body: Focus(
+        autofocus: true,
+        onKeyEvent: (node, event) {
+          if (event is KeyDownEvent) {
+            if (event.logicalKey == LogicalKeyboardKey.keyW) {
+              gameController.movePlayer(Direction.up);
+            } else if (event.logicalKey == LogicalKeyboardKey.keyS) {
+              gameController.movePlayer(Direction.down);
+            } else if (event.logicalKey == LogicalKeyboardKey.keyA) {
+              gameController.movePlayer(Direction.left);
+            } else if (event.logicalKey == LogicalKeyboardKey.keyD) {
+              gameController.movePlayer(Direction.right);
+            }
+          }
+          return KeyEventResult.handled;
+        },
+        child: Row(
+          children: [
+            // Game Grid
+            Expanded(
+              flex: 3,
+              child: GridView.builder(
+                gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                  crossAxisCount: gameState.grid.isNotEmpty ? gameState.grid[0].length : 1,
+                ),
+                itemCount: gameState.grid.length * (gameState.grid.isNotEmpty ? gameState.grid[0].length : 0),
+                itemBuilder: (context, index) {
+                  final row = index ~/ (gameState.grid.isNotEmpty ? gameState.grid[0].length : 1);
+                  final col = index % (gameState.grid.isNotEmpty ? gameState.grid[0].length : 1);
+                  final rail = gameState.railGrid[row][col];
+                  final pipe = gameState.pipeGrid[row][col];
+                  final pollution = gameState.pollutionGrid[row][col];
+                  final nest = gameState.enemyNests.where((n) => n.row == row && n.col == col).firstOrNull;
 
-                final machine = gameState.grid[row][col];
-                final conveyor = gameState.conveyorGrid[row][col];
-                final train = gameState.trains.where((t) => t.locomotivePosition == (row, col)).firstOrNull;
+                  final machine = gameState.grid[row][col];
+                  final conveyor = gameState.conveyorGrid[row][col];
+                  final train = gameState.trains.where((t) => t.locomotivePosition == (row, col)).firstOrNull;
+                  final isPlayerHere = gameState.player.position == (col, row);
 
-                final core = gameState.factoryCore;
-                bool isPartOfCore = false;
-                int? corePartRow, corePartCol;
-                if (core != null &&
-                    row >= core.row &&
-                    row < core.row + factoryCoreSize &&
-                    col >= core.col &&
-                    col < core.col + factoryCoreSize) {
-                  isPartOfCore = true;
-                  corePartRow = row - core.row;
-                  corePartCol = col - core.col;
-                }
-                return GestureDetector(
-                  onTap: () {
-                    switch (gameState.selectedTool) {
-                      case Tool.coalMiner:
-                      case Tool.miner:
-                      case Tool.copperMiner:
-                      case Tool.coalGenerator:
-                      case Tool.offshorePump:
-                      case Tool.oilDerrick:
-                      case Tool.powerPole:
-                      case Tool.smelter:
-                      case Tool.refinery:
-                      case Tool.chemicalPlant:
-                      case Tool.assembler:
-                      case Tool.droneStation:
-                      case Tool.trainStop:
-                      case Tool.storage:
-                      case Tool.grinder:
-                      case Tool.coalMinerT2:
-                      case Tool.minerT2:
-                      case Tool.smelterT2:
-                      case Tool.copperMinerT2:
-                      case Tool.assemblerT2:
-                        const toolToMachine = {
-                          Tool.coalMiner: MachineType.coalMiner,
-                          Tool.miner: MachineType.miner,
-                          Tool.copperMiner: MachineType.copperMiner,
-                          Tool.coalGenerator: MachineType.coalGenerator,
-                          Tool.offshorePump: MachineType.offshorePump,
-                          Tool.oilDerrick: MachineType.oilDerrick,
-                          Tool.powerPole: MachineType.powerPole,
-                          Tool.smelter: MachineType.smelter,
-                          Tool.refinery: MachineType.refinery,
-                          Tool.chemicalPlant: MachineType.chemicalPlant,
-                          Tool.assembler: MachineType.assembler,
-                          Tool.droneStation: MachineType.droneStation,
-                          Tool.trainStop: MachineType.trainStop,
-                          Tool.storage: MachineType.storage,
-                          Tool.grinder: MachineType.grinder,
-                          Tool.coalMinerT2: MachineType.coalMinerT2,
-                          Tool.minerT2: MachineType.minerT2,
-                          Tool.smelterT2: MachineType.smelterT2,
-                          Tool.copperMinerT2: MachineType.copperMinerT2,
-                          Tool.assemblerT2: MachineType.assemblerT2,
-                        };
-                        final typeToPlace = toolToMachine[gameState.selectedTool];
-                        if (typeToPlace != null) {
-                          if (machine != null && machine.type == typeToPlace) {
-                            gameController.rotateMachine(row, col);
-                          } else {
-                            // This will handle both placing on empty and upgrading
-                            gameController.placeMachine(typeToPlace, row, col);
+                  final core = gameState.factoryCore;
+                  bool isPartOfCore = false;
+                  int? corePartRow, corePartCol;
+                  if (core != null &&
+                      row >= core.row &&
+                      row < core.row + factoryCoreSize &&
+                      col >= core.col &&
+                      col < core.col + factoryCoreSize) {
+                    isPartOfCore = true;
+                    corePartRow = row - core.row;
+                    corePartCol = col - core.col;
+                  }
+                  return GestureDetector(
+                    onTap: () {
+                      switch (gameState.selectedTool) {
+                        case Tool.coalMiner:
+                        case Tool.miner:
+                        case Tool.copperMiner:
+                        case Tool.coalGenerator:
+                        case Tool.offshorePump:
+                        case Tool.oilDerrick:
+                        case Tool.powerPole:
+                        case Tool.smelter:
+                        case Tool.refinery:
+                        case Tool.chemicalPlant:
+                        case Tool.assembler:
+                        case Tool.wall:
+                        case Tool.gunTurret:
+                        case Tool.droneStation:
+                        case Tool.trainStop:
+                        case Tool.storage:
+                        case Tool.grinder:
+                        case Tool.coalMinerT2:
+                        case Tool.minerT2:
+                        case Tool.smelterT2:
+                        case Tool.copperMinerT2:
+                        case Tool.assemblerT2:
+                          const toolToMachine = {
+                            Tool.coalMiner: MachineType.coalMiner,
+                            Tool.miner: MachineType.miner,
+                            Tool.copperMiner: MachineType.copperMiner,
+                            Tool.coalGenerator: MachineType.coalGenerator,
+                            Tool.offshorePump: MachineType.offshorePump,
+                            Tool.oilDerrick: MachineType.oilDerrick,
+                            Tool.powerPole: MachineType.powerPole,
+                            Tool.smelter: MachineType.smelter,
+                            Tool.refinery: MachineType.refinery,
+                            Tool.chemicalPlant: MachineType.chemicalPlant,
+                            Tool.assembler: MachineType.assembler,
+                            Tool.wall: MachineType.wall,
+                            Tool.gunTurret: MachineType.gunTurret,
+                            Tool.droneStation: MachineType.droneStation,
+                            Tool.trainStop: MachineType.trainStop,
+                            Tool.storage: MachineType.storage,
+                            Tool.grinder: MachineType.grinder,
+                            Tool.coalMinerT2: MachineType.coalMinerT2,
+                            Tool.minerT2: MachineType.minerT2,
+                            Tool.smelterT2: MachineType.smelterT2,
+                            Tool.copperMinerT2: MachineType.copperMinerT2,
+                            Tool.assemblerT2: MachineType.assemblerT2,
+                          };
+                          final typeToPlace = toolToMachine[gameState.selectedTool];
+                          if (typeToPlace != null) {
+                            if (machine != null && machine.type == typeToPlace) {
+                              gameController.rotateMachine(row, col);
+                            } else {
+                              // This will handle both placing on empty and upgrading
+                              gameController.placeMachine(typeToPlace, row, col);
+                            }
                           }
-                        }
-                        break;
-                      case Tool.conveyor:
-                        // If a conveyor is already here, rotate it. Otherwise, place a new one.
-                        if (conveyor != null) {
-                          gameController.rotateConveyor(row, col);
-                        } else {
-                          // Place a new conveyor, defaulting to down.
-                          gameController.placeConveyor(Direction.down, row, col);
-                        }
-                        break;
-                      case Tool.pipe:
-                        if (pipe != null) {
-                          // gameController.rotatePipe(row, col); // TODO: Implement rotation if needed
-                        } else {
-                          // Place a new pipe, defaulting to down.
-                          gameController.placePipe(Direction.down, row, col);
-                        }
-                        break;
-                      case Tool.rail:
-                        if (rail == null) {
-                          gameController.placeRail(row, col);
-                        } else if (train == null) {
-                          gameController.createTrain(row, col);
-                        }
-                        break;
-                      case Tool.splitter:
-                        // If a conveyor/splitter is already here, rotate it. Otherwise, place a new one.
-                        if (conveyor != null) {
-                          gameController.rotateConveyor(row, col);
-                        } else {
-                          // Place a new splitter, defaulting to down.
-                          gameController.placeSplitter(Direction.down, row, col);
-                        }
-                        break;
-                      case Tool.merger:
-                        // If a conveyor/merger is already here, rotate it. Otherwise, place a new one.
-                        if (conveyor != null) {
-                          gameController.rotateConveyor(row, col);
-                        } else {
-                          // Place a new merger, defaulting to down.
-                          gameController.placeMerger(Direction.down, row, col);
-                        }
-                        break;
-                      case Tool.factoryCore:
-                        gameController.placeFactoryCore(row, col);
-                        break;
-                      case Tool.demolish:
-                        gameController.removeMachine(row, col);
-                        gameController.removeConveyor(row, col);
-                        gameController.removePipe(row, col);
-                        gameController.removeRail(row, col);
-                        break;
-                      case Tool.inspect:
-                        if (machine?.type == MachineType.storage) {
-                          _showStorageOutputDialog(context, ref, row, col);
-                        } else if (machine?.type == MachineType.droneStation) {
-                          _showDroneStationDialog(context, ref, row, col);
-                        } else if (machine?.type == MachineType.trainStop) {
-                          _showTrainStopDialog(context, ref, row, col);
-                        }
-                        break;
-                    }
-                  },
-                  child: GridTileWidget(
-                    machine: machine,
-                    pipe: pipe,
-                    rail: rail,
-                    train: train,
-                    conveyor: conveyor,
-                    isPartOfCore: isPartOfCore,
-                    corePartRow: corePartRow,
-                    corePartCol: corePartCol,
-                    factoryCoreState: core,
-                    resourceOnTile: gameState.resourceGrid[row][col],
-                  ),
-                );
-              },
-            ),
-          ),
-          // Control Panel
-          Expanded(
-            flex: 1,
-            child: DefaultTabController(
-              length: 3,
-              child: Container(
-                color: Theme.of(context).colorScheme.surfaceContainerHighest,
-                child: Column(
-                  children: [
-                    const TabBar(
-                      tabs: [
-                        Tab(icon: Icon(Icons.build), text: 'Build'),
-                        Tab(icon: Icon(Icons.science), text: 'Research'),
-                        Tab(icon: Icon(Icons.hub), text: 'Core'),
-                      ],
+                          break;
+                        case Tool.conveyor:
+                          // If a conveyor is already here, rotate it. Otherwise, place a new one.
+                          if (conveyor != null) {
+                            gameController.rotateConveyor(row, col);
+                          } else {
+                            // Place a new conveyor, defaulting to down.
+                            gameController.placeConveyor(Direction.down, row, col);
+                          }
+                          break;
+                        case Tool.pipe:
+                          if (pipe != null) {
+                            // gameController.rotatePipe(row, col); // TODO: Implement rotation if needed
+                          } else {
+                            // Place a new pipe, defaulting to down.
+                            gameController.placePipe(Direction.down, row, col);
+                          }
+                          break;
+                        case Tool.rail:
+                          if (rail == null) {
+                            gameController.placeRail(row, col);
+                          } else if (train == null) {
+                            gameController.createTrain(row, col);
+                          }
+                          break;
+                        case Tool.splitter:
+                          // If a conveyor/splitter is already here, rotate it. Otherwise, place a new one.
+                          if (conveyor != null) {
+                            gameController.rotateConveyor(row, col);
+                          } else {
+                            // Place a new splitter, defaulting to down.
+                            gameController.placeSplitter(Direction.down, row, col);
+                          }
+                          break;
+                        case Tool.merger:
+                          // If a conveyor/merger is already here, rotate it. Otherwise, place a new one.
+                          if (conveyor != null) {
+                            gameController.rotateConveyor(row, col);
+                          } else {
+                            // Place a new merger, defaulting to down.
+                            gameController.placeMerger(Direction.down, row, col);
+                          }
+                          break;
+                        case Tool.factoryCore:
+                          gameController.placeFactoryCore(row, col);
+                          break;
+                        case Tool.demolish:
+                          gameController.removeMachine(row, col);
+                          gameController.removeConveyor(row, col);
+                          gameController.removePipe(row, col);
+                          gameController.removeRail(row, col);
+                          break;
+                        case Tool.inspect:
+                          if (machine?.type == MachineType.storage) {
+                            _showStorageOutputDialog(context, ref, row, col);
+                          } else if (machine?.type == MachineType.droneStation) {
+                            _showDroneStationDialog(context, ref, row, col);
+                          } else if (machine?.type == MachineType.trainStop) {
+                            _showTrainStopDialog(context, ref, row, col);
+                          }
+                          break;
+                      }
+                    },
+                    child: GridTileWidget(
+                      machine: machine,
+                      pipe: pipe,
+                      rail: rail,
+                      train: train,
+                      nest: nest,
+                      pollution: pollution,
+                      isPlayerHere: isPlayerHere,
+                      enemiesOnTile: gameState.enemies.where((e) => e.position.$1.floor() == col && e.position.$2.floor() == row).toList(),
+                      conveyor: conveyor,
+                      isPartOfCore: isPartOfCore,
+                      corePartRow: corePartRow,
+                      corePartCol: corePartCol,
+                      factoryCoreState: core,
+                      resourceOnTile: gameState.resourceGrid[row][col],
                     ),
-                    Expanded(
-                      child: TabBarView(
-                        children: [
-                          _BuildPanel(),
-                          _ResearchPanel(),
-                          _CorePanel(),
+                  );
+                },
+              ),
+            ),
+            // Control Panel
+            Expanded(
+              flex: 1,
+              child: DefaultTabController(
+                length: 4,
+                child: Container(
+                  color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                  child: Column(
+                    children: [
+                      const TabBar(
+                        tabs: [
+                          Tab(icon: Icon(Icons.person), text: 'Character'),
+                          Tab(icon: Icon(Icons.build), text: 'Build'),
+                          Tab(icon: Icon(Icons.science), text: 'Research'),
+                          Tab(icon: Icon(Icons.hub), text: 'Core'),
                         ],
                       ),
-                    ),
-                  ],
+                      Expanded(
+                        child: TabBarView(
+                          children: [
+                            _CharacterPanel(),
+                            _BuildPanel(),
+                            _ResearchPanel(),
+                            _CorePanel(),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -418,6 +450,77 @@ class GamePage extends ConsumerWidget {
   }
 }
 
+class _CharacterPanel extends ConsumerWidget {
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final gameState = ref.watch(gameControllerProvider);
+    final player = gameState.player;
+    final controller = ref.read(gameControllerProvider.notifier);
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text('Hand Crafting', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const SizedBox(height: 8),
+          if (player.craftingQueue.isNotEmpty)
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('Crafting: ${player.craftingQueue.first.outputs.keys.first.name}'),
+                const SizedBox(height: 4),
+                LinearProgressIndicator(value: player.craftingProgress / player.craftingQueue.first.productionTime),
+                const SizedBox(height: 8),
+              ],
+            ),
+          ...handCraftingRecipes.map((recipe) {
+            // Only show recipe if prerequisites are met (e.g., power armor for exoskeleton)
+            if (recipe.outputs.keys.first == ResourceType.exoskeletonLegs && !gameState.unlockedResearch.contains(ResearchType.powerArmor)) {
+              return const SizedBox.shrink();
+            }
+            return Card(
+              child: Padding(
+                padding: const EdgeInsets.all(8.0),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(recipe.outputs.keys.first.name),
+                        ...recipe.inputs.entries.map((e) => Text('${e.key.name}: ${e.value}', style: Theme.of(context).textTheme.bodySmall)),
+                      ],
+                    ),
+                    ElevatedButton(onPressed: () => controller.handCraft(recipe), child: const Text('Craft')),
+                  ],
+                ),
+              ),
+            );
+          }),
+          const SizedBox(height: 24),
+          const Text('Inventory', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+          const Divider(),
+          ListView.builder(
+            itemCount: gameState.inventory.length,
+            shrinkWrap: true, // Important for ListView inside SingleChildScrollView
+            physics: const NeverScrollableScrollPhysics(), // Scrolling is handled by parent
+            itemBuilder: (context, index) {
+              final entry = gameState.inventory.entries.elementAt(index);
+              // Don't show resources the player has none of.
+              if (entry.value <= 0) return const SizedBox.shrink();
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4.0),
+                child: Text('${entry.key.name}: ${entry.value}', style: const TextStyle(fontSize: 16)),
+              );
+            },
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 class _CorePanel extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -519,6 +622,13 @@ class _BuildPanel extends ConsumerWidget {
             BuildingCard(tool: Tool.rail, selectedTool: gameState.selectedTool),
             BuildingCard(tool: Tool.trainStop, selectedTool: gameState.selectedTool),
           ],
+          if (unlocked.contains(ResearchType.military)) ...[
+            const SizedBox(height: 16),
+            const Text('Military', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 8),
+            BuildingCard(tool: Tool.wall, selectedTool: gameState.selectedTool),
+            BuildingCard(tool: Tool.gunTurret, selectedTool: gameState.selectedTool),
+          ],
           if (unlocked.contains(ResearchType.tier2Machines)) ...[
             const SizedBox(height: 16),
             const Text('Tier 2 Buildings', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
@@ -548,23 +658,6 @@ class _BuildPanel extends ConsumerWidget {
               ToolButton(tool: Tool.inspect, selectedTool: gameState.selectedTool),
               ToolButton(tool: Tool.demolish, selectedTool: gameState.selectedTool),
             ],
-          ),
-          const SizedBox(height: 24),
-          const Text('Inventory', style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
-          const Divider(),
-          ListView.builder(
-            itemCount: gameState.inventory.length,
-            shrinkWrap: true, // Important for ListView inside SingleChildScrollView
-            physics: const NeverScrollableScrollPhysics(), // Scrolling is handled by parent
-            itemBuilder: (context, index) {
-              final entry = gameState.inventory.entries.elementAt(index);
-              // Don't show resources the player has none of.
-              if (entry.value <= 0) return const SizedBox.shrink();
-              return Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4.0),
-                child: Text('${entry.key.name}: ${entry.value}', style: const TextStyle(fontSize: 16)),
-              );
-            },
           ),
         ],
       ),
@@ -742,6 +835,10 @@ class BuildingCard extends ConsumerWidget {
         return machineCosts[MachineType.assembler]!;
       case Tool.droneStation:
         return machineCosts[MachineType.droneStation]!;
+      case Tool.wall:
+        return machineCosts[MachineType.wall]!;
+      case Tool.gunTurret:
+        return machineCosts[MachineType.gunTurret]!;
       case Tool.trainStop:
         return machineCosts[MachineType.trainStop]!;
       case Tool.offshorePump:
@@ -774,7 +871,7 @@ class BuildingCard extends ConsumerWidget {
         return conveyorMergerCost;
       case Tool.factoryCore:
         return factoryCorePlacementCost;
-      default:
+      default: // For tools with no cost like inspect, demolish
         return {};
     }
   }
@@ -811,6 +908,10 @@ class GridTileWidget extends StatelessWidget {
     this.machine,
     this.rail,
     this.train,
+    this.nest,
+    this.enemiesOnTile = const [],
+    this.isPlayerHere = false,
+    this.pollution = 0,
     this.pipe,
     this.conveyor,
     this.isPartOfCore = false,
@@ -823,6 +924,10 @@ class GridTileWidget extends StatelessWidget {
   final Machine? machine;
   final Rail? rail;
   final Train? train;
+  final EnemyNest? nest;
+  final List<Enemy> enemiesOnTile;
+  final bool isPlayerHere;
+  final int pollution;
   final Pipe? pipe;
   final Conveyor? conveyor;
   final bool isPartOfCore;
@@ -844,6 +949,9 @@ class GridTileWidget extends StatelessWidget {
           // Render Resource Patch
           if (resourceOnTile != null) _buildResourcePatch(resourceOnTile!),
 
+          // Render Pollution
+          if (pollution > 10) _buildPollution(pollution),
+
           // Render Factory Core
           if (isPartOfCore) _buildFactoryCoreTile(),
 
@@ -858,6 +966,15 @@ class GridTileWidget extends StatelessWidget {
 
           // Render Machine
           if (machine != null) _buildMachine(machine!),
+
+          // Render Enemy Nest
+          if (nest != null) _buildEnemyNest(nest!),
+
+          // Render Enemies
+          ...enemiesOnTile.map((e) => _buildEnemy(e)),
+
+          // Render Player
+          if (isPlayerHere) _buildPlayer(),
 
           // Render Train
           if (train != null) _buildTrain(train!),
@@ -910,6 +1027,12 @@ class GridTileWidget extends StatelessWidget {
         break;
       case MachineType.chemicalPlant:
         icon = Icons.science;
+        break;
+      case MachineType.wall:
+        icon = Icons.crop_square;
+        break;
+      case MachineType.gunTurret:
+        icon = Icons.camera_outdoor;
         break;
       case MachineType.coalGenerator:
         icon = Icons.bolt;
@@ -966,6 +1089,14 @@ class GridTileWidget extends StatelessWidget {
     // For storage, show the configured output item on top.
     if (machine.type == MachineType.storage && machine.configuredOutput != null) {
       indicators.add(_buildResource(machine.configuredOutput!));
+    }
+
+    // Show health bar if damaged
+    if (machine.health < 100) {
+      indicators.add(Positioned(
+        bottom: 2,
+        child: SizedBox(width: 40, height: 4, child: LinearProgressIndicator(value: machine.health / 100, color: Colors.green, backgroundColor: Colors.red)),
+      ));
     }
 
     final isTier2 = machine.type.name.endsWith('T2');
@@ -1062,6 +1193,47 @@ class GridTileWidget extends StatelessWidget {
       case Direction.right: icon = Icons.keyboard_arrow_down; top = -8; break; // input from top
     }
     return Positioned(top: top, bottom: bottom, left: left, right: right, child: Icon(icon, color: Colors.orange.withAlpha(200), size: 20));
+  }
+
+  Widget _buildPollution(int amount) {
+    // Opacity scales with pollution amount, capped at 0.7
+    final opacity = (amount / 500).clamp(0.0, 0.7);
+    return Container(
+      color: Colors.brown.withOpacity(opacity),
+    );
+  }
+
+  Widget _buildEnemyNest(EnemyNest nest) {
+    return Stack(
+      alignment: Alignment.center,
+      children: [
+        Icon(Icons.hive, color: Colors.red.shade900, size: 40),
+        Positioned(
+          top: 2,
+          child: SizedBox(width: 40, height: 4, child: LinearProgressIndicator(value: nest.health / nestMaxHealth, color: Colors.red, backgroundColor: Colors.black45)),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildEnemy(Enemy enemy) {
+    return Positioned(
+      left: (enemy.position.$1 - enemy.position.$1.floor()) * 48,
+      top: (enemy.position.$2 - enemy.position.$2.floor()) * 48,
+      child: Stack(
+        children: [
+          const Icon(Icons.bug_report, color: Colors.limeAccent, size: 24),
+          Positioned(
+            top: 0,
+            child: SizedBox(width: 24, height: 2, child: LinearProgressIndicator(value: enemy.health / enemyMaxHealth, color: Colors.red, backgroundColor: Colors.transparent)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPlayer() {
+    return const Icon(Icons.person, color: Colors.cyan, size: 32);
   }
 
   Widget _buildRail() {
@@ -1212,6 +1384,10 @@ extension ResourceColor on ResourceType {
         return Colors.green;
       case ResourceType.plastic:
         return Colors.blue.shade200;
+      case ResourceType.exoskeletonLegs:
+        return Colors.grey.shade400;
+      case ResourceType.ammunition:
+        return Colors.yellow.shade800;
       case ResourceType.water:
         return Colors.blue;
       case ResourceType.crudeOil:

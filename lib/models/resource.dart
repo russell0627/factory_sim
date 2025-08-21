@@ -10,6 +10,8 @@ enum ResourceType {
   copperWire,
   circuit,
   plastic,
+  ammunition,
+  exoskeletonLegs,
 
   // Fluids
   water,

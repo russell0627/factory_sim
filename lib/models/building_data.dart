@@ -38,6 +38,14 @@ final Map<MachineType, Map<ResourceType, int>> machineCosts = {
     ResourceType.ironPlate: 50,
     ResourceType.circuit: 25,
   },
+  MachineType.wall: {
+    ResourceType.ironPlate: 5,
+  },
+  MachineType.gunTurret: {
+    ResourceType.ironPlate: 20,
+    ResourceType.circuit: 10,
+    ResourceType.ironIngot: 10,
+  },
   MachineType.offshorePump: {
     ResourceType.ironPlate: 15,
     ResourceType.circuit: 5,

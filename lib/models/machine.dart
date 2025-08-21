@@ -1,7 +1,7 @@
 import 'package:factory_sim/models/resource.dart';
 import 'package:factory_sim/models/drone.dart';
+import 'package:factory_sim/models/turret_data.dart';
 import 'package:factory_sim/models/train_stop_data.dart';
-import 'package:factory_sim/models/pipe.dart';
 import 'package:factory_sim/models/conveyor.dart';
 
 /// Enum for all types of machines in the game.
@@ -17,6 +17,8 @@ enum MachineType {
   offshorePump,
   oilDerrick,
   assembler,
+  wall,
+  gunTurret,
   droneStation,
   trainStop,
   storage,
@@ -45,6 +47,8 @@ class Machine {
     this.isPowered = true,
     this.droneStationData,
     this.trainStopData,
+    this.health = 100, // Default health
+    this.turretData,
   });
 
   final MachineType type;
@@ -79,6 +83,12 @@ class Machine {
   /// Specific data for train stops, if applicable.
   final TrainStopData? trainStopData;
 
+  /// Current health of the machine.
+  final int health;
+
+  /// Specific data for turrets, if applicable.
+  final TurretData? turretData;
+
   Machine copyWith({
     MachineType? type,
     int? row,
@@ -94,6 +104,8 @@ class Machine {
     bool? isPowered,
     DroneStationData? droneStationData,
     TrainStopData? trainStopData,
+    int? health,
+    TurretData? turretData,
   }) {
     return Machine(
       type: type ?? this.type,
@@ -109,14 +121,16 @@ class Machine {
       isPowered: isPowered ?? this.isPowered,
       droneStationData: droneStationData ?? this.droneStationData,
       trainStopData: trainStopData ?? this.trainStopData,
+      health: health ?? this.health,
+      turretData: turretData ?? this.turretData,
     );
   }
 
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is Machine && runtimeType == other.runtimeType && type == other.type && row == other.row && col == other.col && direction == other.direction && inputBuffer == other.inputBuffer && outputBuffer == other.outputBuffer && configuredOutput == other.configuredOutput && productionProgress == other.productionProgress && fluidInputBuffer == other.fluidInputBuffer && fluidOutputBuffer == other.fluidOutputBuffer && isPowered == other.isPowered && droneStationData == other.droneStationData && trainStopData == other.trainStopData;
+      other is Machine && runtimeType == other.runtimeType && type == other.type && row == other.row && col == other.col && direction == other.direction && inputBuffer == other.inputBuffer && outputBuffer == other.outputBuffer && configuredOutput == other.configuredOutput && productionProgress == other.productionProgress && fluidInputBuffer == other.fluidInputBuffer && fluidOutputBuffer == other.fluidOutputBuffer && isPowered == other.isPowered && droneStationData == other.droneStationData && trainStopData == other.trainStopData && health == other.health && turretData == other.turretData;
 
   @override
-  int get hashCode => type.hashCode ^ row.hashCode ^ col.hashCode ^ direction.hashCode ^ inputBuffer.hashCode ^ outputBuffer.hashCode ^ configuredOutput.hashCode ^ productionProgress.hashCode ^ fluidInputBuffer.hashCode ^ fluidOutputBuffer.hashCode ^ isPowered.hashCode ^ droneStationData.hashCode ^ trainStopData.hashCode;
+  int get hashCode => type.hashCode ^ row.hashCode ^ col.hashCode ^ direction.hashCode ^ inputBuffer.hashCode ^ outputBuffer.hashCode ^ configuredOutput.hashCode ^ productionProgress.hashCode ^ fluidInputBuffer.hashCode ^ fluidOutputBuffer.hashCode ^ isPowered.hashCode ^ droneStationData.hashCode ^ trainStopData.hashCode ^ health.hashCode ^ turretData.hashCode;
 }

@@ -7,6 +7,7 @@ import 'package:factory_sim/models/pipe.dart';
 import 'package:factory_sim/models/rail.dart';
 import 'package:factory_sim/models/train.dart';
 import 'package:factory_sim/models/tool.dart';
+import 'package:factory_sim/models/turret_data.dart';
 import 'package:factory_sim/models/research.dart';
 import 'package:factory_sim/models/machine.dart';
 import 'package:factory_sim/models/conveyor.dart';
@@ -14,11 +15,28 @@ import 'package:factory_sim/models/resource.dart';
 import 'package:factory_sim/models/factory_core.dart';
 import 'package:factory_sim/models/drone.dart';
 import 'package:factory_sim/models/train_stop_data.dart';
+import 'package:factory_sim/models/enemy.dart';
+import 'package:factory_sim/models/player.dart';
 import 'package:factory_sim/models/recipe.dart';
 import 'package:factory_sim/models/building_data.dart';
 import 'package:factory_sim/models/power_data.dart';
 
 part 'game_controller.g.dart';
+
+const Map<MachineType, int> pollutionGeneration = {
+  MachineType.miner: 1,
+  MachineType.coalMiner: 1,
+  MachineType.copperMiner: 1,
+  MachineType.smelter: 3,
+  MachineType.coalGenerator: 5,
+  MachineType.refinery: 4,
+  MachineType.chemicalPlant: 4,
+  // T2
+  MachineType.minerT2: 1,
+  MachineType.coalMinerT2: 1,
+  MachineType.copperMinerT2: 1,
+  MachineType.smelterT2: 3,
+};
 
 @riverpod
 class GameController extends _$GameController {
@@ -27,7 +45,7 @@ class GameController extends _$GameController {
   @override
   GameState build() {
     // This is where you would initialize your game state.
-    const gridSize = 10;
+    const gridSize = 20;
 
     // Generate resource patches
     final resourceGrid = List.generate(gridSize, (_) => List<ResourceType?>.filled(gridSize, null));
@@ -49,12 +67,29 @@ class GameController extends _$GameController {
       }
     }
 
+    // Spawn enemy nests
+    final enemyNests = <EnemyNest>[];
+    int nestsToSpawn = 3;
+    while (nestsToSpawn > 0) {
+      final r = random.nextInt(gridSize);
+      final c = random.nextInt(gridSize);
+      // Spawn away from the center
+      if (resourceGrid[r][c] == null && (r < 2 || r > gridSize - 3 || c < 2 || c > gridSize - 3)) {
+        enemyNests.add(EnemyNest(row: r, col: c));
+        nestsToSpawn--;
+      }
+    }
+
     final initialState = GameState(
       grid: List.generate(gridSize, (_) => List.filled(gridSize, null)),
       conveyorGrid: List.generate(gridSize, (_) => List.filled(gridSize, null)),
       railGrid: List.generate(gridSize, (_) => List.filled(gridSize, null)),
       trains: const [],
       pipeGrid: List.generate(gridSize, (_) => List.filled(gridSize, null)),
+      player: Player(position: (gridSize ~/ 2, gridSize ~/ 2)),
+      pollutionGrid: List.generate(gridSize, (_) => List.filled(gridSize, 0)),
+      enemyNests: enemyNests,
+      enemies: const [],
       inventory: {
         ResourceType.ironOre: 100,
         ResourceType.copperOre: 50,
@@ -86,15 +121,37 @@ class GameController extends _$GameController {
     final nextMachineGrid = state.grid.map((row) => List<Machine?>.from(row)).toList();
     final nextPipeGrid = state.pipeGrid.map((row) => List<Pipe?>.from(row)).toList();
     final nextConveyorGrid = state.conveyorGrid.map((row) => List<Conveyor?>.from(row)).toList();
+    final nextPollutionGrid = state.pollutionGrid.map((row) => List<int>.from(row)).toList();
+    var nextEnemyNests = List<EnemyNest>.from(state.enemyNests);
+    var nextPlayer = state.player;
+    var nextEnemies = List<Enemy>.from(state.enemies);
     final nextTrains = state.trains.map((t) => t).toList(); // Trains are immutable, so a shallow copy is fine for now
     final nextInventory = Map<ResourceType, int>.from(state.inventory);
     var nextPoints = state.points;
     var nextFactoryCore = state.factoryCore;
+    var nextEnemyId = state.nextEnemyId;
     final claimedResources = <(int, int)>{}; // Track resources taken by intake this tick
     final claimedPipes = <(int, int)>{}; // Track pipes taken by fluid intake this tick
     final movedResources = <(int, int)>{}; // Track which resources have already moved this tick.
     final movedPipes = <(int, int)>{}; // Track which pipes have already moved this tick.
     final random = Random();
+
+    // --- Phase -1: Player Hand Crafting ---
+    if (nextPlayer.craftingQueue.isNotEmpty) {
+      final recipe = nextPlayer.craftingQueue.first;
+      final newProgress = nextPlayer.craftingProgress + 1;
+      if (newProgress >= recipe.productionTime) {
+        // Crafting complete
+        final resource = recipe.outputs.keys.first;
+        final amount = recipe.outputs.values.first;
+        nextInventory.update(resource, (v) => v + amount, ifAbsent: () => amount);
+        final newQueue = List<Recipe>.from(nextPlayer.craftingQueue)..removeAt(0);
+        nextPlayer = nextPlayer.copyWith(craftingQueue: newQueue, clearCrafting: newQueue.isEmpty);
+      } else {
+        // Continue crafting
+        nextPlayer = nextPlayer.copyWith(craftingProgress: newProgress);
+      }
+    }
 
     // --- Phase 0: Power Management ---
     var totalDemand = 0;
@@ -169,6 +226,21 @@ class GameController extends _$GameController {
       }
     }
 
+    // --- Phase 0.5: Pollution Generation & Spreading ---
+    // Generate
+    for (int r = 0; r < state.grid.length; r++) {
+      for (int c = 0; c < state.grid[r].length; c++) {
+        final machine = state.grid[r][c];
+        if (machine != null && machine.isPowered) {
+          final pollution = pollutionGeneration[machine.type] ?? 0;
+          if (pollution > 0) {
+            nextPollutionGrid[r][c] += pollution;
+          }
+        }
+      }
+    }
+    // TODO: Add pollution spreading logic
+
     // --- Phase 1: Machine Intake ---
     // Machines with recipes that have inputs try to pull from adjacent belts.
     for (int r = 0; r < nextMachineGrid.length; r++) {
@@ -178,6 +250,7 @@ class GameController extends _$GameController {
 
         final isSmelter = machine.type == MachineType.smelter || machine.type == MachineType.smelterT2;
         final isAssembler = machine.type == MachineType.assembler || machine.type == MachineType.assemblerT2;
+        final isTurret = machine.type == MachineType.gunTurret;
         final isRefinery = machine.type == MachineType.refinery;
 
         if (isSmelter) {
@@ -220,6 +293,16 @@ class GameController extends _$GameController {
               nextMachineGrid[r][c] = currentMachineState.copyWith(inputBuffer: newInputs);
               claimedResources.add(leftCoords);
             }
+          }
+        } else if (isTurret) {
+          // Turrets take ammo from the back
+          final backCoords = _getCoordsForDirection(r, c, _getBackInputDirection(machine.direction));
+          final resourceOnBelt = _getResourceAt(backCoords);
+          if (resourceOnBelt == ResourceType.ammunition && (machine.inputBuffer[ResourceType.ammunition] ?? 0) < 20) {
+            final newInputs = Map<ResourceType, int>.from(machine.inputBuffer);
+            newInputs.update(ResourceType.ammunition, (v) => v + 1, ifAbsent: () => 1);
+            nextMachineGrid[r][c] = machine.copyWith(inputBuffer: newInputs);
+            claimedResources.add(backCoords);
           }
         } else if (isAssembler) {
           var currentMachineState = nextMachineGrid[r][c]!;
@@ -666,6 +749,79 @@ class GameController extends _$GameController {
       }
     }
 
+    // --- Phase 5.8: Enemy Logic ---
+    // Nests
+    final newNests = <EnemyNest>[];
+    for (final nest in nextEnemyNests) {
+      if (nest.health <= 0) continue; // Skip dead nests
+
+      var newCooldown = nest.spawnCooldown;
+      if (state.pollutionGrid[nest.row][nest.col] > 50) {
+        newCooldown = max(0, newCooldown - 1);
+      }
+
+      if (newCooldown <= 0) {
+        // Spawn enemy
+        final newEnemy = Enemy(id: nextEnemyId, position: (nest.col + 0.5, nest.row + 0.5));
+        nextEnemies.add(newEnemy);
+        nextEnemyId++;
+        newCooldown = 10; // Reset cooldown
+      }
+      newNests.add(nest.copyWith(spawnCooldown: newCooldown));
+    }
+    nextEnemyNests = newNests;
+
+    // Enemies
+    final survivingEnemies = <Enemy>[];
+    for (var enemy in nextEnemies) {
+      if (enemy.health <= 0) continue; // Skip dead enemies
+
+      if (enemy.path.isEmpty) {
+        // Find a new target
+        // TODO: Find path to nearest building
+      } else {
+        // Move along path
+        // TODO: Implement movement
+      }
+
+      // Attack
+      final (ex, ey) = enemy.position;
+      final (er, ec) = (ey.floor(), ex.floor());
+      // Check adjacent tiles for buildings to attack
+      bool attacked = false;
+      for (final dir in Direction.values) {
+        final (ar, ac) = _getCoordsForDirection(er, ec, dir);
+        final machineToAttack = _getMachineAt((ar, ac));
+        if (machineToAttack != null) {
+          final newHealth = machineToAttack.health - 5; // 5 damage
+          nextMachineGrid[ar][ac] = machineToAttack.copyWith(health: newHealth);
+          if (newHealth <= 0) {
+            // TODO: Handle building destruction effects
+            nextMachineGrid[ar][ac] = null;
+          }
+          attacked = true;
+          break;
+        }
+      }
+      survivingEnemies.add(enemy);
+    }
+    nextEnemies = survivingEnemies;
+
+    // --- Phase 5.9: Turret Logic ---
+    for (int r = 0; r < nextMachineGrid.length; r++) {
+      for (int c = 0; c < nextMachineGrid[r].length; c++) {
+        final machine = nextMachineGrid[r][c];
+        if (machine?.type != MachineType.gunTurret) continue;
+
+        // TODO: Turret firing logic
+        // 1. Find nearest enemy in range
+        // 2. If target found, has ammo, and cooldown is ready:
+        // 3.   - Consume ammo
+        // 4.   - Damage enemy
+        // 5.   - Reset cooldown
+      }
+    }
+
     // --- Phase 6: Finalize State ---
     // Clear resources that were consumed by machine intake
     for (final coords in claimedResources) {
@@ -682,12 +838,17 @@ class GameController extends _$GameController {
       grid: nextMachineGrid,
       conveyorGrid: nextConveyorGrid,
       railGrid: state.railGrid, // Rail grid doesn't change during tick
+      player: nextPlayer,
+      pollutionGrid: nextPollutionGrid,
+      enemyNests: nextEnemyNests,
+      enemies: nextEnemies,
       inventory: nextInventory,
       pipeGrid: nextPipeGrid,
       powerCapacity: totalCapacity,
       powerDemand: totalDemand,
       points: nextPoints,
       factoryCore: nextFactoryCore,
+      nextEnemyId: nextEnemyId,
       gameTick: state.gameTick + 1,
       trains: nextTrains,
     );
@@ -705,6 +866,11 @@ class GameController extends _$GameController {
   void placeMachine(MachineType type, int row, int col) {
     // 1. Check if the cell is within bounds.
     if (row < 0 || row >= state.grid.length || col < 0 || col >= state.grid[0].length) return;
+    // 1.5 Check if player is close enough
+    if (!_isWithinPlayerReach((row, col))) {
+      state = state.copyWith(lastMessage: 'Too far away to build.');
+      return;
+    }
 
     final existingMachine = state.grid[row][col];
 
@@ -757,6 +923,10 @@ class GameController extends _$GameController {
       state = state.copyWith(lastMessage: 'Train Stops must be placed on rails.');
       return;
     }
+    if ((type == MachineType.wall || type == MachineType.gunTurret) && !state.unlockedResearch.contains(ResearchType.military)) {
+      state = state.copyWith(lastMessage: 'Requires Military research.');
+      return;
+    }
     final newInventory = _deductCost(cost);
 
     var newMachine = Machine(type: type, row: row, col: col);
@@ -765,6 +935,9 @@ class GameController extends _$GameController {
     }
     if (type == MachineType.trainStop) {
       newMachine = newMachine.copyWith(trainStopData: const TrainStopData());
+    }
+    if (type == MachineType.gunTurret) {
+      newMachine = newMachine.copyWith(turretData: const TurretData());
     }
     final newGrid = state.grid.map((rowList) => List<Machine?>.from(rowList)).toList();
     newGrid[row][col] = newMachine;
@@ -779,6 +952,11 @@ class GameController extends _$GameController {
   void placeFactoryCore(int row, int col) {
     // 1. Check if the 3x3 area is within bounds and empty.
     if (row < 0 || row + factoryCoreSize > state.grid.length || col < 0 || col + factoryCoreSize > state.grid[0].length) return;
+    // 1.5 Check reach
+    if (!_isWithinPlayerReach((row + 1, col + 1))) {
+      state = state.copyWith(lastMessage: 'Too far away to build the Factory Core.');
+      return;
+    }
 
     for (int r = row; r < row + factoryCoreSize; r++) {
       for (int c = col; c < col + factoryCoreSize; c++) {
@@ -804,6 +982,11 @@ class GameController extends _$GameController {
   void removeMachine(int row, int col) {
     if (row < 0 || row >= state.grid.length || col < 0 || col >= state.grid[0].length) return;
     if (state.grid[row][col] == null) return;
+    // Check reach
+    if (!_isWithinPlayerReach((row, col))) {
+      state = state.copyWith(lastMessage: 'Too far away to demolish.');
+      return;
+    }
 
     final newGrid = state.grid.map((rowList) => List<Machine?>.from(rowList)).toList();
     newGrid[row][col] = null;
@@ -815,6 +998,11 @@ class GameController extends _$GameController {
   void placeConveyor(Direction direction, int row, int col) {
     if (row < 0 || row >= state.conveyorGrid.length || col < 0 || col >= state.conveyorGrid[0].length) return;
     if (state.conveyorGrid[row][col] != null) return;
+    // Check reach
+    if (!_isWithinPlayerReach((row, col))) {
+      state = state.copyWith(lastMessage: 'Too far away to build.');
+      return;
+    }
 
     // 2. Check if player can afford it.
     if (!_canAfford(conveyorCost, 'a conveyor')) return;
@@ -834,6 +1022,11 @@ class GameController extends _$GameController {
   void placeSplitter(Direction direction, int row, int col) {
     if (row < 0 || row >= state.conveyorGrid.length || col < 0 || col >= state.conveyorGrid[0].length) return;
     if (state.conveyorGrid[row][col] != null) return;
+    // Check reach
+    if (!_isWithinPlayerReach((row, col))) {
+      state = state.copyWith(lastMessage: 'Too far away to build.');
+      return;
+    }
 
     // 2. Check if player can afford it.
     if (!_canAfford(conveyorSplitterCost, 'a splitter')) return;
@@ -858,6 +1051,11 @@ class GameController extends _$GameController {
   void placeMerger(Direction direction, int row, int col) {
     if (row < 0 || row >= state.conveyorGrid.length || col < 0 || col >= state.conveyorGrid[0].length) return;
     if (state.conveyorGrid[row][col] != null) return;
+    // Check reach
+    if (!_isWithinPlayerReach((row, col))) {
+      state = state.copyWith(lastMessage: 'Too far away to build.');
+      return;
+    }
 
     // 2. Check if player can afford it.
     if (!_canAfford(conveyorMergerCost, 'a merger')) return;
@@ -882,6 +1080,11 @@ class GameController extends _$GameController {
   void removeConveyor(int row, int col) {
     if (row < 0 || row >= state.conveyorGrid.length || col < 0 || col >= state.conveyorGrid[0].length) return;
     if (state.conveyorGrid[row][col] == null) return;
+    // Check reach
+    if (!_isWithinPlayerReach((row, col))) {
+      state = state.copyWith(lastMessage: 'Too far away to demolish.');
+      return;
+    }
 
     final newGrid = state.conveyorGrid.map((rowList) => List<Conveyor?>.from(rowList)).toList();
     newGrid[row][col] = null;
@@ -893,6 +1096,11 @@ class GameController extends _$GameController {
   void placePipe(Direction direction, int row, int col) {
     if (row < 0 || row >= state.pipeGrid.length || col < 0 || col >= state.pipeGrid[0].length) return;
     if (state.pipeGrid[row][col] != null) return;
+    // Check reach
+    if (!_isWithinPlayerReach((row, col))) {
+      state = state.copyWith(lastMessage: 'Too far away to build.');
+      return;
+    }
 
     // 2. Check if player can afford it.
     if (!_canAfford(pipeCost, 'a pipe')) return;
@@ -912,6 +1120,11 @@ class GameController extends _$GameController {
   void removePipe(int row, int col) {
     if (row < 0 || row >= state.pipeGrid.length || col < 0 || col >= state.pipeGrid[0].length) return;
     if (state.pipeGrid[row][col] == null) return;
+    // Check reach
+    if (!_isWithinPlayerReach((row, col))) {
+      state = state.copyWith(lastMessage: 'Too far away to demolish.');
+      return;
+    }
     final newGrid = state.pipeGrid.map((rowList) => List<Pipe?>.from(rowList)).toList();
     newGrid[row][col] = null;
     state = state.copyWith(pipeGrid: newGrid);
@@ -921,6 +1134,11 @@ class GameController extends _$GameController {
   void placeRail(int row, int col) {
     if (row < 0 || row >= state.railGrid.length || col < 0 || col >= state.railGrid[0].length) return;
     if (state.railGrid[row][col] != null) return;
+    // Check reach
+    if (!_isWithinPlayerReach((row, col))) {
+      state = state.copyWith(lastMessage: 'Too far away to build.');
+      return;
+    }
     if (!_canAfford(railCost, 'a rail')) return;
 
     final newInventory = _deductCost(railCost);
@@ -934,6 +1152,11 @@ class GameController extends _$GameController {
   void removeRail(int row, int col) {
     if (row < 0 || row >= state.railGrid.length || col < 0 || col >= state.railGrid[0].length) return;
     if (state.railGrid[row][col] == null) return;
+    // Check reach
+    if (!_isWithinPlayerReach((row, col))) {
+      state = state.copyWith(lastMessage: 'Too far away to demolish.');
+      return;
+    }
     final newGrid = state.railGrid.map((rowList) => List<Rail?>.from(rowList)).toList();
     newGrid[row][col] = null;
     state = state.copyWith(railGrid: newGrid);
@@ -943,6 +1166,11 @@ class GameController extends _$GameController {
   void rotateConveyor(int row, int col) {
     final conveyor = state.conveyorGrid[row][col];
     if (conveyor == null) return; // Can't rotate something that isn't there.
+    // Check reach
+    if (!_isWithinPlayerReach((row, col))) {
+      state = state.copyWith(lastMessage: 'Too far away to rotate.');
+      return;
+    }
 
     // Cycle through the directions: down -> left -> up -> right -> down
     final currentDirectionIndex = Direction.values.indexOf(conveyor.direction);
@@ -959,6 +1187,11 @@ class GameController extends _$GameController {
   void rotateMachine(int row, int col) {
     final machine = state.grid[row][col];
     if (machine == null) return;
+    // Check reach
+    if (!_isWithinPlayerReach((row, col))) {
+      state = state.copyWith(lastMessage: 'Too far away to rotate.');
+      return;
+    }
 
     // Cycle through the directions
     final currentDirectionIndex = Direction.values.indexOf(machine.direction);
@@ -1039,6 +1272,9 @@ class GameController extends _$GameController {
     // --- Handle specific research effects ---
     var nextMachineGrid = state.grid;
     var nextConveyorGrid = state.conveyorGrid;
+    var nextPipeGrid = state.pipeGrid;
+    var nextRailGrid = state.railGrid;
+    var nextPollutionGrid = state.pollutionGrid;
     var nextResourceGrid = state.resourceGrid;
 
     if (type == ResearchType.landExpansion) {
@@ -1050,6 +1286,9 @@ class GameController extends _$GameController {
       // Create new larger grids, initialized with nulls
       final expandedMachineGrid = List.generate(newHeight, (_) => List<Machine?>.filled(newWidth, null));
       final expandedConveyorGrid = List.generate(newHeight, (_) => List<Conveyor?>.filled(newWidth, null));
+      final expandedPipeGrid = List.generate(newHeight, (_) => List<Pipe?>.filled(newWidth, null));
+      final expandedRailGrid = List.generate(newHeight, (_) => List<Rail?>.filled(newWidth, null));
+      final expandedPollutionGrid = List.generate(newHeight, (_) => List<int>.filled(newWidth, 0));
       final expandedResourceGrid = List.generate(newHeight, (_) => List<ResourceType?>.filled(newWidth, null));
 
       // Copy old data
@@ -1057,6 +1296,9 @@ class GameController extends _$GameController {
         for (int c = 0; c < currentWidth; c++) {
           expandedMachineGrid[r][c] = state.grid[r][c];
           expandedConveyorGrid[r][c] = state.conveyorGrid[r][c];
+          expandedPipeGrid[r][c] = state.pipeGrid[r][c];
+          expandedRailGrid[r][c] = state.railGrid[r][c];
+          expandedPollutionGrid[r][c] = state.pollutionGrid[r][c];
           expandedResourceGrid[r][c] = state.resourceGrid[r][c];
         }
       }
@@ -1077,6 +1319,9 @@ class GameController extends _$GameController {
 
       nextMachineGrid = expandedMachineGrid;
       nextConveyorGrid = expandedConveyorGrid;
+      nextPipeGrid = expandedPipeGrid;
+      nextRailGrid = expandedRailGrid;
+      nextPollutionGrid = expandedPollutionGrid;
       nextResourceGrid = expandedResourceGrid;
     }
 
@@ -1086,6 +1331,9 @@ class GameController extends _$GameController {
       lastMessage: 'Unlocked: ${research.name}!',
       grid: nextMachineGrid,
       conveyorGrid: nextConveyorGrid,
+      pipeGrid: nextPipeGrid,
+      railGrid: nextRailGrid,
+      pollutionGrid: nextPollutionGrid,
       resourceGrid: nextResourceGrid,
     );
   }
@@ -1096,6 +1344,53 @@ class GameController extends _$GameController {
     final newId = state.trains.length;
     final newTrain = Train(id: newId, locomotivePosition: (row, col));
     state = state.copyWith(trains: [...state.trains, newTrain]);
+  }
+
+  /// Moves the player character.
+  void movePlayer(Direction direction) {
+    int moveSpeed = 1;
+    if (state.player.equipment.contains(ResourceType.exoskeletonLegs)) {
+      moveSpeed = 2;
+    }
+
+    var (c, r) = state.player.position;
+
+    for (int i = 0; i < moveSpeed; i++) {
+      var (nextC, nextR) = (c, r);
+      switch (direction) {
+        case Direction.up: nextR--; break;
+        case Direction.down: nextR++; break;
+        case Direction.left: nextC--; break;
+        case Direction.right: nextC++; break;
+      }
+
+      // Check bounds
+      if (nextR < 0 || nextR >= state.grid.length || nextC < 0 || nextC >= state.grid[0].length) continue;
+
+      // Check for collision with machines
+      if (state.grid[nextR][nextC] != null) continue;
+
+      (c, r) = (nextC, nextR);
+    }
+
+    state = state.copyWith(player: state.player.copyWith(position: (c, r)));
+  }
+
+  /// Adds a recipe to the player's hand-crafting queue.
+  void handCraft(Recipe recipe) {
+    if (state.player.craftingQueue.length >= 5) {
+      state = state.copyWith(lastMessage: 'Crafting queue is full.');
+      return;
+    }
+
+    if (_canAfford(recipe.inputs, 'to hand-craft ${recipe.outputs.keys.first.name}')) {
+      final newInventory = _deductCost(recipe.inputs);
+      final newQueue = List<Recipe>.from(state.player.craftingQueue)..add(recipe);
+      state = state.copyWith(
+        inventory: newInventory,
+        player: state.player.copyWith(craftingQueue: newQueue),
+      );
+    }
   }
 
   /// Builds a new drone at the specified station.
@@ -1139,6 +1434,13 @@ class GameController extends _$GameController {
   }
 
   // --- Private Helper Methods ---
+
+  bool _isWithinPlayerReach((int, int) coords) {
+    const reach = 5;
+    final (playerC, playerR) = state.player.position;
+    final distance = (playerR - coords.$1).abs() + (playerC - coords.$2).abs();
+    return distance <= reach;
+  }
 
   bool _canAfford(Map<ResourceType, int> cost, String buildingName) {
     for (final entry in cost.entries) {
@@ -1367,13 +1669,13 @@ class GameController extends _$GameController {
 
   Map<ResourceType, int> _consumeSolidInputs(Recipe recipe, Machine machine) {
     final newInputs = Map<ResourceType, int>.from(machine.inputBuffer);
-    recipe.inputs.forEach((key, value) => {if (!key.isFluid) newInputs.update(key, (v) => v - value)});
+    recipe.inputs.forEach((key, value) {if (!key.isFluid) newInputs.update(key, (v) => v - value);});
     return newInputs;
   }
 
   Map<ResourceType, int> _consumeFluidInputs(Recipe recipe, Machine machine) {
     final newInputs = Map<ResourceType, int>.from(machine.fluidInputBuffer);
-    recipe.inputs.forEach((key, value) => {if (key.isFluid) newInputs.update(key, (v) => v - value)});
+    recipe.inputs.forEach((key, value) {if (key.isFluid) newInputs.update(key, (v) => v - value);});
     return newInputs;
   }
 
