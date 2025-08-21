@@ -4,7 +4,13 @@ enum Tool {
   demolish,
 
   // Buildings
+  coalMiner,
   miner,
+  grinder,
   conveyor,
+  splitter,
+  merger,
   smelter,
+  assembler,
+  storage,
 }

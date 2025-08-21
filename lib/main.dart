@@ -19,6 +19,7 @@ class FactorySimApp extends StatelessWidget {
       title: 'Factory Simulator',
       theme: ThemeData.dark(useMaterial3: true),
       home: const HomePage(),
+      debugShowCheckedModeBanner: false,
     );
   }
 }

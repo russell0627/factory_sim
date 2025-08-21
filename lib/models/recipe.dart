@@ -21,10 +21,24 @@ class Recipe {
 
 /// A central map of all machine recipes in the game.
 final Map<MachineType, Recipe> allRecipes = {
+  MachineType.coalMiner: const Recipe(
+    // Miners don't have inputs, they generate resources.
+    outputs: {ResourceType.coal: 1},
+    productionTime: 5, // Takes 5 ticks to mine one coal
+  ),
   MachineType.miner: const Recipe(
     // Miners don't have inputs, they generate resources.
     outputs: {ResourceType.ironOre: 1},
     productionTime: 5, // Takes 5 ticks to mine one ore
   ),
-  // Recipes for Smelter and Assembler will be added here later.
+  MachineType.smelter: const Recipe(
+    inputs: {ResourceType.ironOre: 1, ResourceType.coal: 1},
+    outputs: {ResourceType.ironIngot: 1},
+    productionTime: 2, // Takes 2 ticks to smelt one ingot
+  ),
+  MachineType.assembler: const Recipe(
+    inputs: {ResourceType.ironIngot: 2}, // Takes 2 ingots to make a plate
+    outputs: {ResourceType.ironPlate: 1},
+    productionTime: 2,
+  ),
 };

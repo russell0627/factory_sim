@@ -6,6 +6,7 @@ enum ResourceType {
   coal,
 
   // Processed
+  ironIngot,
   ironPlate,
   copperPlate,
 }
