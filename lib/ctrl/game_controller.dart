@@ -1,13 +1,22 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 import 'package:factory_sim/ctrl/game_state.dart';
+import 'package:factory_sim/models/pipe.dart';
+import 'package:factory_sim/models/rail.dart';
+import 'package:factory_sim/models/train.dart';
 import 'package:factory_sim/models/tool.dart';
+import 'package:factory_sim/models/research.dart';
 import 'package:factory_sim/models/machine.dart';
 import 'package:factory_sim/models/conveyor.dart';
 import 'package:factory_sim/models/resource.dart';
+import 'package:factory_sim/models/factory_core.dart';
+import 'package:factory_sim/models/drone.dart';
+import 'package:factory_sim/models/train_stop_data.dart';
 import 'package:factory_sim/models/recipe.dart';
 import 'package:factory_sim/models/building_data.dart';
+import 'package:factory_sim/models/power_data.dart';
 
 part 'game_controller.g.dart';
 
@@ -19,15 +28,40 @@ class GameController extends _$GameController {
   GameState build() {
     // This is where you would initialize your game state.
     const gridSize = 10;
+
+    // Generate resource patches
+    final resourceGrid = List.generate(gridSize, (_) => List<ResourceType?>.filled(gridSize, null));
+    final random = Random();
+    for (int r = 0; r < gridSize; r++) {
+      for (int c = 0; c < gridSize; c++) {
+        final val = random.nextDouble();
+        if (val < 0.05) { // 5% chance for iron
+          resourceGrid[r][c] = ResourceType.ironOre;
+        } else if (val < 0.08) { // 3% chance for copper
+          resourceGrid[r][c] = ResourceType.copperOre;
+        } else if (val < 0.12) { // 4% chance for coal
+          resourceGrid[r][c] = ResourceType.coal;
+        } else if (val < 0.15) { // 3% chance for water
+          resourceGrid[r][c] = ResourceType.water;
+        } else if (val < 0.17) { // 2% chance for oil
+          resourceGrid[r][c] = ResourceType.oilSeep;
+        }
+      }
+    }
+
     final initialState = GameState(
       grid: List.generate(gridSize, (_) => List.filled(gridSize, null)),
       conveyorGrid: List.generate(gridSize, (_) => List.filled(gridSize, null)),
+      railGrid: List.generate(gridSize, (_) => List.filled(gridSize, null)),
+      trains: const [],
+      pipeGrid: List.generate(gridSize, (_) => List.filled(gridSize, null)),
       inventory: {
         ResourceType.ironOre: 100,
         ResourceType.copperOre: 50,
         ResourceType.coal: 100,
-        ResourceType.ironPlate: 120,
+        ResourceType.ironPlate: 90, // Enough for basic setup before research
       },
+      resourceGrid: resourceGrid,
     );
 
     // Start the game loop when the provider is first created.
@@ -50,60 +84,207 @@ class GameController extends _$GameController {
   void tick() {
     // Create mutable copies of the state grids to calculate the next frame.
     final nextMachineGrid = state.grid.map((row) => List<Machine?>.from(row)).toList();
+    final nextPipeGrid = state.pipeGrid.map((row) => List<Pipe?>.from(row)).toList();
     final nextConveyorGrid = state.conveyorGrid.map((row) => List<Conveyor?>.from(row)).toList();
+    final nextTrains = state.trains.map((t) => t).toList(); // Trains are immutable, so a shallow copy is fine for now
     final nextInventory = Map<ResourceType, int>.from(state.inventory);
     var nextPoints = state.points;
+    var nextFactoryCore = state.factoryCore;
     final claimedResources = <(int, int)>{}; // Track resources taken by intake this tick
+    final claimedPipes = <(int, int)>{}; // Track pipes taken by fluid intake this tick
     final movedResources = <(int, int)>{}; // Track which resources have already moved this tick.
+    final movedPipes = <(int, int)>{}; // Track which pipes have already moved this tick.
+    final random = Random();
 
-    // --- Phase 1: Machine Intake ---
-    // Machines with recipes that have inputs try to pull from adjacent belts.
+    // --- Phase 0: Power Management ---
+    var totalDemand = 0;
+    var totalCapacity = 0;
+
+    // --- Step 1: Identify all power sources and find all machines connected to them ---
+    final powerSources = <(int, int, int)>{}; // r, c, radius
+    final connectedMachineCoords = <(int, int)>{}; // r, c
+
+    for (int r = 0; r < state.grid.length; r++) {
+      for (int c = 0; c < state.grid[r].length; c++) {
+        final machine = state.grid[r][c];
+        if (machine == null) continue;
+        if (powerGeneration.containsKey(machine.type)) {
+          powerSources.add((r, c, 4)); // Generator radius
+        } else if (machine.type == MachineType.powerPole) {
+          powerSources.add((r, c, 3)); // Pole radius
+        }
+      }
+    }
+
     for (int r = 0; r < state.grid.length; r++) {
       for (int c = 0; c < state.grid[r].length; c++) {
         final machine = state.grid[r][c];
         if (machine == null) continue;
 
-        if (machine.type == MachineType.smelter) {
-          final recipe = allRecipes[MachineType.smelter]!;
+        for (final source in powerSources) {
+          // Use Manhattan distance for a diamond-shaped coverage area
+          final distance = (r - source.$1).abs() + (c - source.$2).abs();
+          if (distance <= source.$3) {
+            connectedMachineCoords.add((r, c));
+            break; // Once connected, no need to check other sources
+          }
+        }
+      }
+    }
+
+    // --- Step 2: Calculate capacity from fueled generators and consume their fuel ---
+    for (final sourceCoords in powerSources) {
+      final machine = state.grid[sourceCoords.$1][sourceCoords.$2];
+      if (machine != null && powerGeneration.containsKey(machine.type)) {
+        if ((machine.inputBuffer[ResourceType.coal] ?? 0) > 0) {
+          totalCapacity += powerGeneration[machine.type]!;
+          final newInputs = Map<ResourceType, int>.from(machine.inputBuffer);
+          newInputs.update(ResourceType.coal, (v) => v - 1);
+          nextMachineGrid[sourceCoords.$1][sourceCoords.$2] = machine.copyWith(inputBuffer: newInputs);
+        }
+      }
+    }
+
+    // --- Step 3: Calculate demand from ONLY connected machines ---
+    for (final coords in connectedMachineCoords) {
+      final machine = state.grid[coords.$1][coords.$2];
+      if (machine != null) totalDemand += powerConsumption[machine.type] ?? 0;
+    }
+
+    // --- Step 4: Determine brownout and update power status for all machines ---
+    final hasPower = totalCapacity >= totalDemand;
+    for (int r = 0; r < nextMachineGrid.length; r++) {
+      for (int c = 0; c < nextMachineGrid[r].length; c++) {
+        final machine = nextMachineGrid[r][c];
+        if (machine == null) continue;
+
+        if (powerConsumption.containsKey(machine.type)) {
+          final isConnected = connectedMachineCoords.contains((r, c));
+          nextMachineGrid[r][c] = machine.copyWith(isPowered: isConnected && hasPower);
+        } else if (powerGeneration.containsKey(machine.type)) {
+          // A generator is "powered" if it has fuel.
+          final hasFuel = (nextMachineGrid[r][c]?.inputBuffer[ResourceType.coal] ?? 0) > 0;
+          nextMachineGrid[r][c] = machine.copyWith(isPowered: hasFuel);
+        }
+      }
+    }
+
+    // --- Phase 1: Machine Intake ---
+    // Machines with recipes that have inputs try to pull from adjacent belts.
+    for (int r = 0; r < nextMachineGrid.length; r++) {
+      for (int c = 0; c < nextMachineGrid[r].length; c++) {
+        final machine = nextMachineGrid[r][c];
+        if (machine == null) continue;
+
+        final isSmelter = machine.type == MachineType.smelter || machine.type == MachineType.smelterT2;
+        final isAssembler = machine.type == MachineType.assembler || machine.type == MachineType.assemblerT2;
+        final isRefinery = machine.type == MachineType.refinery;
+
+        if (isSmelter) {
           var currentMachineState = nextMachineGrid[r][c]!;
+          final backCoords = _getCoordsForDirection(r, c, _getBackInputDirection(machine.direction));
+          final resourceOnBelt = _getResourceAt(backCoords);
 
-          // Intake Iron Ore from Back
-          if ((currentMachineState.inputBuffer[ResourceType.ironOre] ?? 0) < recipe.inputs[ResourceType.ironOre]!) {
-            final backCoords = _getCoordsForDirection(r, c, _getBackInputDirection(machine.direction));
-            final resourceOnBelt = _getResourceAt(backCoords);
-
-            if (resourceOnBelt == ResourceType.ironOre && !claimedResources.contains(backCoords)) {
+          // Smelters take ore from the back
+          if (resourceOnBelt != null && !claimedResources.contains(backCoords)) {
+            bool tookResource = false;
+            // Try to take Iron Ore
+            if (resourceOnBelt == ResourceType.ironOre && (currentMachineState.inputBuffer[ResourceType.ironOre] ?? 0) < 2) {
               final newInputs = Map<ResourceType, int>.from(currentMachineState.inputBuffer);
               newInputs.update(ResourceType.ironOre, (v) => v + 1, ifAbsent: () => 1);
               nextMachineGrid[r][c] = currentMachineState.copyWith(inputBuffer: newInputs);
+              tookResource = true;
+            }
+            // Try to take Copper Ore (if researched)
+            else if (resourceOnBelt == ResourceType.copperOre && state.unlockedResearch.contains(ResearchType.copperProcessing) && (currentMachineState.inputBuffer[ResourceType.copperOre] ?? 0) < 2) {
+              final newInputs = Map<ResourceType, int>.from(currentMachineState.inputBuffer);
+              newInputs.update(ResourceType.copperOre, (v) => v + 1, ifAbsent: () => 1);
+              nextMachineGrid[r][c] = currentMachineState.copyWith(inputBuffer: newInputs);
+              tookResource = true;
+            }
+
+            if (tookResource) {
               claimedResources.add(backCoords);
               currentMachineState = nextMachineGrid[r][c]!; // Refresh state
             }
           }
 
           // Intake Coal from Left
-          if ((currentMachineState.inputBuffer[ResourceType.coal] ?? 0) < recipe.inputs[ResourceType.coal]!) {
+          if ((currentMachineState.inputBuffer[ResourceType.coal] ?? 0) < 2) {
             final leftCoords = _getCoordsForDirection(r, c, _getLeftInputDirection(machine.direction));
-            final resourceOnBelt = _getResourceAt(leftCoords);
+            final resourceOnLeftBelt = _getResourceAt(leftCoords);
 
-            if (resourceOnBelt == ResourceType.coal && !claimedResources.contains(leftCoords)) {
+            if (resourceOnLeftBelt == ResourceType.coal && !claimedResources.contains(leftCoords)) {
               final newInputs = Map<ResourceType, int>.from(currentMachineState.inputBuffer);
               newInputs.update(ResourceType.coal, (v) => v + 1, ifAbsent: () => 1);
               nextMachineGrid[r][c] = currentMachineState.copyWith(inputBuffer: newInputs);
               claimedResources.add(leftCoords);
             }
           }
+        } else if (isAssembler) {
+          var currentMachineState = nextMachineGrid[r][c]!;
+          final backCoords = _getCoordsForDirection(r, c, _getBackInputDirection(machine.direction));
+          final resourceOnBelt = _getResourceAt(backCoords);
+
+          if (resourceOnBelt != null && !claimedResources.contains(backCoords)) {
+            bool canTake = false;
+            // Check if it's an input for any of the available assembler recipes
+            final availableRecipes = machine.type == MachineType.assembler ? assemblerRecipes : assemblerRecipesT2;
+            for (final recipe in availableRecipes) {
+              if (recipe.inputs.containsKey(resourceOnBelt)) {
+                // For simplicity, let's use a generic buffer limit of 10 per item type.
+                if ((currentMachineState.inputBuffer[resourceOnBelt] ?? 0) < 10) {
+                  canTake = true;
+                }
+                break;
+              }
+            }
+
+            if (canTake) {
+              final newInputs = Map<ResourceType, int>.from(currentMachineState.inputBuffer);
+              newInputs.update(resourceOnBelt, (v) => v + 1, ifAbsent: () => 1);
+              nextMachineGrid[r][c] = currentMachineState.copyWith(inputBuffer: newInputs);
+              claimedResources.add(backCoords);
+            }
+          }
+        } else if (isRefinery) {
+          // Refineries take fluid from the back
+          final backCoords = _getCoordsForDirection(r, c, _getBackInputDirection(machine.direction));
+          final pipe = _getPipeAt(backCoords);
+          if (pipe != null) {
+            if (pipe.fluid == ResourceType.crudeOil && pipe.fluidAmount > 0 && !claimedPipes.contains(backCoords)) {
+              final currentMachineState = nextMachineGrid[r][c]!;
+              final currentBuffer = currentMachineState.fluidInputBuffer[ResourceType.crudeOil] ?? 0;
+              if (currentBuffer < 100) {
+                final newInputs = Map<ResourceType, int>.from(currentMachineState.fluidInputBuffer);
+                newInputs.update(ResourceType.crudeOil, (v) => v + pipe.fluidAmount, ifAbsent: () => pipe.fluidAmount);
+                nextMachineGrid[r][c] = currentMachineState.copyWith(fluidInputBuffer: newInputs);
+                claimedPipes.add(backCoords);
+              }
+            }
+          }
         } else {
           // --- Other Machines: Single Input from Back ---
           final recipe = allRecipes[machine.type];
-          final canTakeInput = (recipe?.inputs.isNotEmpty ?? false) || machine.type == MachineType.storage || machine.type == MachineType.grinder;
+          final canTakeInput = (recipe?.inputs.isNotEmpty ?? false) ||
+              machine.type == MachineType.storage ||
+              machine.type == MachineType.grinder ||
+              machine.type == MachineType.coalGenerator ||
+              machine.type == MachineType.powerPole; // Poles don't take items, but this prevents errors
 
           if (canTakeInput) {
             final backCoords = _getCoordsForDirection(r, c, _getBackInputDirection(machine.direction));
             final resourceOnBelt = _getResourceAt(backCoords);
 
             if (resourceOnBelt != null && !claimedResources.contains(backCoords)) {
-              if (machine.type == MachineType.grinder) {
+              if (machine.type == MachineType.coalGenerator) {
+                if (resourceOnBelt == ResourceType.coal && (machine.inputBuffer[ResourceType.coal] ?? 0) < 10) {
+                  final newInputs = Map<ResourceType, int>.from(machine.inputBuffer);
+                  newInputs.update(ResourceType.coal, (v) => v + 1, ifAbsent: () => 1);
+                  nextMachineGrid[r][c] = machine.copyWith(inputBuffer: newInputs);
+                  claimedResources.add(backCoords);
+                }
+              } else if (machine.type == MachineType.grinder) {
                 // Grinders consume any resource and turn it into points.
                 nextPoints++;
                 claimedResources.add(backCoords);
@@ -122,66 +303,134 @@ class GameController extends _$GameController {
       }
     }
 
+    // --- Phase 1.5: Factory Core Intake ---
+    if (nextFactoryCore != null && !nextFactoryCore.isComplete) {
+      final core = nextFactoryCore;
+      final currentPhaseRequirements = factoryCorePhaseRequirements[core.phase];
+      final nextCoreProgress = Map<ResourceType, int>.from(core.progress);
+      bool progressMade = false;
+
+      // Check all tiles adjacent to the core's bounding box for feeding conveyors
+      for (int rOffset = -1; rOffset <= factoryCoreSize; rOffset++) {
+        for (int cOffset = -1; cOffset <= factoryCoreSize; cOffset++) {
+          // Skip interior and corner tiles for this simple check
+          if ((rOffset >= 0 && rOffset < factoryCoreSize) && (cOffset >= 0 && cOffset < factoryCoreSize)) continue;
+
+          final checkR = core.row + rOffset;
+          final checkC = core.col + cOffset;
+
+          // Check if this tile is a conveyor pointing towards the core
+          final conveyor = _getConveyorAt((checkR, checkC));
+          if (conveyor == null || conveyor.resource == null) continue;
+
+          final (nextR, nextC) = _getCoordsForDirection(checkR, checkC, conveyor.direction);
+
+          // Is it pointing into the core's 3x3 bounding box?
+          bool pointingIntoCore = nextR >= core.row && nextR < core.row + factoryCoreSize && nextC >= core.col && nextC < core.col + factoryCoreSize;
+
+          if (pointingIntoCore && !claimedResources.contains((checkR, checkC))) {
+            final resource = conveyor.resource!;
+            if (currentPhaseRequirements.containsKey(resource)) {
+              final needed = currentPhaseRequirements[resource]!;
+              final have = nextCoreProgress[resource] ?? 0;
+              if (have < needed) {
+                nextCoreProgress.update(resource, (v) => v + 1, ifAbsent: () => 1);
+                claimedResources.add((checkR, checkC));
+                progressMade = true;
+              }
+            }
+          }
+        }
+      }
+
+      if (progressMade) {
+        nextFactoryCore = core.copyWith(progress: nextCoreProgress);
+        // Check for phase completion
+        bool phaseComplete = true;
+        for (final entry in currentPhaseRequirements.entries) {
+          if ((nextCoreProgress[entry.key] ?? 0) < entry.value) {
+            phaseComplete = false;
+            break;
+          }
+        }
+
+        if (phaseComplete) {
+          final nextPhase = core.phase + 1;
+          final isGameWon = nextPhase >= factoryCorePhaseRequirements.length;
+          nextFactoryCore = nextFactoryCore.copyWith(phase: isGameWon ? core.phase : nextPhase, progress: {}, isComplete: isGameWon);
+        }
+      }
+    }
+
+    // --- Phase 1.7: Train Stop Loading/Unloading ---
+    // For simplicity, train stops interact with adjacent storage containers.
+    for (int r = 0; r < nextMachineGrid.length; r++) {
+      for (int c = 0; c < nextMachineGrid[r].length; c++) {
+        final machine = nextMachineGrid[r][c];
+        if (machine?.type != MachineType.trainStop) continue;
+
+        // Find a train at this stop
+        final trainIndex = nextTrains.indexWhere((t) => t.locomotivePosition == (r, c));
+        if (trainIndex == -1) continue;
+
+        final train = nextTrains[trainIndex];
+        final stopData = machine!.trainStopData!;
+
+        // Find an adjacent storage container
+        Machine? storage;
+        for (final dir in Direction.values) {
+          final (adjR, adjC) = _getCoordsForDirection(r, c, dir);
+          final adjMachine = _getMachineAt((adjR, adjC));
+          if (adjMachine?.type == MachineType.storage) {
+            storage = adjMachine;
+            break;
+          }
+        }
+        if (storage == null) continue;
+
+        if (stopData.mode == TrainStopMode.load && train.status == TrainStatus.waitingForLoad) {
+          // Find first empty wagon or wagon with same resource type
+          final wagonIndex = train.wagons.indexWhere((w) => w.amount < wagonCapacity && (w.resource == null || w.resource == storage!.configuredOutput));
+          if (wagonIndex != -1 && storage.configuredOutput != null) {
+            final resource = storage.configuredOutput!;
+            if ((nextInventory[resource] ?? 0) > 0) {
+              nextInventory.update(resource, (v) => v - 1);
+              final newWagons = List<CargoWagon>.from(train.wagons);
+              final oldWagon = newWagons[wagonIndex];
+              newWagons[wagonIndex] = oldWagon.copyWith(resource: resource, amount: oldWagon.amount + 1);
+              nextTrains[trainIndex] = train.copyWith(wagons: newWagons);
+            }
+          }
+        } else if (stopData.mode == TrainStopMode.unload && train.status == TrainStatus.waitingForUnload) {
+          // Find first wagon with items
+          final wagonIndex = train.wagons.indexWhere((w) => w.amount > 0);
+          if (wagonIndex != -1) {
+            final wagon = train.wagons[wagonIndex];
+            nextInventory.update(wagon.resource!, (v) => v + 1, ifAbsent: () => 1);
+            final newWagons = List<CargoWagon>.from(train.wagons);
+            newWagons[wagonIndex] = wagon.copyWith(amount: wagon.amount - 1);
+            nextTrains[trainIndex] = train.copyWith(wagons: newWagons);
+          }
+        }
+      }
+    }
+
     // --- Phase 2: Machine Production ---
     // Machines work on their recipes and fill their output buffers.
     for (int r = 0; r < state.grid.length; r++) {
       for (int c = 0; c < state.grid[r].length; c++) {
         // Use the machine from the next grid, as it may have received inputs this tick
         final machine = nextMachineGrid[r][c];
-        if (machine == null) continue;
+        // Machine must be powered to produce! (Generators don't produce via recipes, so they are exempt here)
+        if (machine == null || !machine.isPowered) continue;
 
-        final recipe = allRecipes[machine.type];
-
-        // Handle machines with recipes
-        if (recipe != null) {
-          // Handle miners (no inputs). This now includes both iron and coal miners.
-          if ((machine.type == MachineType.miner || machine.type == MachineType.coalMiner) && machine.outputBuffer == null) {
-            int newProgress = machine.productionProgress + 1;
-            if (newProgress >= recipe.productionTime) {
-              // Production complete!
-              newProgress = 0;
-              final outputResource = recipe.outputs.keys.first;
-              nextMachineGrid[r][c] = machine.copyWith(
-                productionProgress: newProgress,
-                outputBuffer: outputResource,
-              );
-            } else {
-              // Continue production.
-              nextMachineGrid[r][c] = machine.copyWith(productionProgress: newProgress);
-            }
-          }
-
-          // Handle machines with inputs (Smelters, Assemblers)
-          if ((machine.type == MachineType.smelter || machine.type == MachineType.assembler) && machine.outputBuffer == null) {
-            // Check if we have enough resources to start
-            bool canProduce = true;
-            for (final entry in recipe.inputs.entries) {
-              if ((machine.inputBuffer[entry.key] ?? 0) < entry.value) {
-                canProduce = false;
-                break;
-              }
-            }
-
-            if (canProduce) {
-              // If we are not already producing, consume resources and start
-              if (machine.productionProgress == 0) {
-                final newInputBuffer = Map<ResourceType, int>.from(machine.inputBuffer);
-                for (final entry in recipe.inputs.entries) {
-                  newInputBuffer.update(entry.key, (value) => value - entry.value);
-                }
-                nextMachineGrid[r][c] = machine.copyWith(inputBuffer: newInputBuffer, productionProgress: 1);
-              } else {
-                // Continue production
-                int newProgress = machine.productionProgress + 1;
-                if (newProgress >= recipe.productionTime) {
-                  nextMachineGrid[r][c] = machine.copyWith(productionProgress: 0, outputBuffer: recipe.outputs.keys.first);
-                } else {
-                  nextMachineGrid[r][c] = machine.copyWith(productionProgress: newProgress);
-                }
-              }
-            }
-          }
+        // --- Production for machines with no inputs (Miners, Pumps, Derricks) ---
+        if (allRecipes.containsKey(machine.type) && allRecipes[machine.type]!.inputs.isEmpty) {
+          _handleResourceExtraction(r, c, machine, nextMachineGrid);
         }
+
+        // --- Production for machines with inputs (Smelters, Assemblers, etc.) ---
+        _handleRecipeProduction(r, c, machine, nextMachineGrid);
       }
     }
 
@@ -208,7 +457,7 @@ class GameController extends _$GameController {
         final machine = nextMachineGrid[r][c];
         if (machine?.outputBuffer == null) continue;
 
-        // Machines eject onto the tile in front of them.
+        // Solid items eject onto the tile in front of them.
         int ejectR = r, ejectC = c;
         switch (machine!.direction) {
           case Direction.up: ejectR--; break;
@@ -223,6 +472,37 @@ class GameController extends _$GameController {
           // Since _isValidAndEmpty checks for null, we can safely use the ! operator here.
           nextConveyorGrid[ejectR][ejectC] = nextConveyorGrid[ejectR][ejectC]!.copyWith(resource: resourceToEject);
           nextMachineGrid[r][c] = machine.copyWith(clearOutputBuffer: true);
+        }
+      }
+    }
+
+    // --- Phase 4.5: Fluid Ejection ---
+    for (int r = 0; r < nextMachineGrid.length; r++) {
+      for (int c = 0; c < nextMachineGrid[r].length; c++) {
+        final machine = nextMachineGrid[r][c];
+        if (machine?.fluidOutputBuffer.isEmpty ?? true) continue;
+
+        // Fluid items eject onto the tile in front of them.
+        int ejectR = r, ejectC = c;
+        switch (machine!.direction) {
+          case Direction.up: ejectR--; break;
+          case Direction.down: ejectR++; break;
+          case Direction.left: ejectC--; break;
+          case Direction.right: ejectC++; break;
+        }
+
+        // Check if the target tile is a valid pipe that can accept the fluid.
+        final pipe = _getPipeAt((ejectR, ejectC));
+        if (pipe != null) {
+          if ((pipe.fluid == null || pipe.fluid == machine.fluidOutputBuffer.keys.first) && pipe.fluidAmount < pipeCapacity) {
+            final fluidToEject = machine.fluidOutputBuffer.keys.first;
+            final amountToEject = machine.fluidOutputBuffer.values.first;
+            final newAmount = pipe.fluidAmount + amountToEject;
+            if (newAmount <= pipeCapacity) {
+              nextPipeGrid[ejectR][ejectC] = pipe.copyWith(fluid: fluidToEject, fluidAmount: newAmount);
+              nextMachineGrid[r][c] = machine.copyWith(fluidOutputBuffer: {}); // Clears the buffer after ejection
+            }
+          }
         }
       }
     }
@@ -281,6 +561,111 @@ class GameController extends _$GameController {
       }
     }
 
+    // --- Phase 5.2: Pipe Movement ---
+    for (int r = 0; r < state.pipeGrid.length; r++) {
+      for (int c = 0; c < state.pipeGrid[r].length; c++) {
+        final pipe = state.pipeGrid[r][c];
+        if (pipe != null && pipe.fluid != null && pipe.fluidAmount > 0 && !claimedPipes.contains((r, c)) && !movedPipes.contains((r, c))) {
+          final (nextR, nextC) = _getCoordsForDirection(r, c, pipe.direction);
+          final nextPipe = _getPipeAt((nextR, nextC)); // Check state grid for pipe existence
+          if (nextPipe != null) {
+            if ((nextPipe.fluid == null || nextPipe.fluid == pipe.fluid) && nextPipe.fluidAmount < pipeCapacity && !movedPipes.contains((nextR, nextC))) {
+              final amountToMove = min(10, pipe.fluidAmount);
+              final spaceInNext = pipeCapacity - nextPipe.fluidAmount;
+              final actualMoveAmount = min(amountToMove, spaceInNext);
+              if (actualMoveAmount > 0) {
+                nextPipeGrid[nextR][nextC] = nextPipe.copyWith(fluid: pipe.fluid, fluidAmount: nextPipe.fluidAmount + actualMoveAmount);
+                nextPipeGrid[r][c] = pipe.copyWith(fluidAmount: pipe.fluidAmount - actualMoveAmount);
+                movedPipes.add((nextR, nextC));
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // --- Phase 5.5: Drone Exploration ---
+    for (int r = 0; r < nextMachineGrid.length; r++) {
+      for (int c = 0; c < nextMachineGrid[r].length; c++) {
+        final machine = nextMachineGrid[r][c];
+        if (machine?.type == MachineType.droneStation && machine!.droneStationData != null) {
+          final newDrones = <Drone>[];
+          bool changed = false;
+          for (final drone in machine.droneStationData!.drones) {
+            if (drone.status == DroneStatus.exploring) {
+              final newTicks = drone.ticksRemaining - 1;
+              if (newTicks <= 0) {
+                // Drone has returned!
+                final pointsGained = random.nextInt(50) + 25; // 25 to 74 points
+                final resourceGained = [ResourceType.ironOre, ResourceType.copperOre, ResourceType.coal][random.nextInt(3)];
+                final amountGained = random.nextInt(20) + 10; // 10 to 29 of a resource
+
+                nextPoints += pointsGained;
+                nextInventory.update(resourceGained, (v) => v + amountGained, ifAbsent: () => amountGained);
+
+                state = state.copyWith(lastMessage: 'Drone returned! Gained $pointsGained points and $amountGained ${resourceGained.name}.');
+
+                newDrones.add(drone.copyWith(status: DroneStatus.idle, ticksRemaining: 0));
+                changed = true;
+              } else {
+                // Still exploring
+                newDrones.add(drone.copyWith(ticksRemaining: newTicks));
+              }
+            } else {
+              newDrones.add(drone);
+            }
+          }
+
+          if (changed) {
+            final newStationData = machine.droneStationData!.copyWith(drones: newDrones);
+            nextMachineGrid[r][c] = machine.copyWith(droneStationData: newStationData);
+          }
+        }
+      }
+    }
+
+    // --- Phase 5.7: Train Movement & Scheduling ---
+    for (int i = 0; i < nextTrains.length; i++) {
+      final train = nextTrains[i];
+      if (train.schedule.isEmpty) continue;
+
+      if (train.status == TrainStatus.movingToStation) {
+        if (train.currentPath.isNotEmpty) {
+          final nextPos = train.currentPath.first;
+          final remainingPath = train.currentPath.sublist(1);
+          nextTrains[i] = train.copyWith(locomotivePosition: nextPos, currentPath: remainingPath);
+        } else {
+          // Arrived at station
+          final stop = _findStopByName(train.schedule[train.currentScheduleIndex].stationName);
+          if (stop != null && stop.trainStopData != null) {
+            final newStatus = stop.trainStopData!.mode == TrainStopMode.load ? TrainStatus.waitingForLoad : TrainStatus.waitingForUnload;
+            nextTrains[i] = train.copyWith(status: newStatus, ticksToWait: 5); // Wait 5 seconds
+          }
+        }
+      } else if (train.status == TrainStatus.idleAtStation || train.status == TrainStatus.waitingForLoad || train.status == TrainStatus.waitingForUnload) {
+        // Check if waiting is done
+        if (train.ticksToWait > 0) {
+          nextTrains[i] = train.copyWith(ticksToWait: train.ticksToWait - 1);
+        } else {
+          // Depart to next station
+          final nextScheduleIndex = (train.currentScheduleIndex + 1) % train.schedule.length;
+          final nextStopName = train.schedule[nextScheduleIndex].stationName;
+          final destinationStop = _findStopByName(nextStopName);
+
+          if (destinationStop != null) {
+            final path = _findPathOnRails(train.locomotivePosition, (destinationStop.row, destinationStop.col));
+            if (path != null) {
+              nextTrains[i] = train.copyWith(
+                status: TrainStatus.movingToStation,
+                currentScheduleIndex: nextScheduleIndex,
+                currentPath: path,
+              );
+            }
+          }
+        }
+      }
+    }
+
     // --- Phase 6: Finalize State ---
     // Clear resources that were consumed by machine intake
     for (final coords in claimedResources) {
@@ -288,37 +673,131 @@ class GameController extends _$GameController {
       if (conveyor != null) nextConveyorGrid[coords.$1][coords.$2] = conveyor.copyWith(clearResource: true);
     }
 
+    for (final coords in claimedPipes) {
+      final pipe = nextPipeGrid[coords.$1][coords.$2];
+      if (pipe != null) nextPipeGrid[coords.$1][coords.$2] = pipe.copyWith(clearFluid: true);
+    }
+
     state = state.copyWith(
       grid: nextMachineGrid,
       conveyorGrid: nextConveyorGrid,
+      railGrid: state.railGrid, // Rail grid doesn't change during tick
       inventory: nextInventory,
+      pipeGrid: nextPipeGrid,
+      powerCapacity: totalCapacity,
+      powerDemand: totalDemand,
       points: nextPoints,
+      factoryCore: nextFactoryCore,
       gameTick: state.gameTick + 1,
+      trains: nextTrains,
     );
   }
 
-  /// Places a new machine on the grid.
-  void placeMachine(MachineType type, int row, int col) {
-    // 1. Check if the cell is within bounds and empty.
-    if (row < 0 || row >= state.grid.length || col < 0 || col >= state.grid[0].length) return;
-    if (state.grid[row][col] != null) return;
+  final Map<MachineType, MachineType> _upgradePaths = {
+    MachineType.coalMiner: MachineType.coalMinerT2,
+    MachineType.miner: MachineType.minerT2,
+    MachineType.copperMiner: MachineType.copperMinerT2,
+    MachineType.smelter: MachineType.smelterT2,
+    MachineType.assembler: MachineType.assemblerT2,
+  };
 
-    // 2. Check if the player can afford it.
+  /// Places a new machine on the grid, or upgrades an existing one.
+  void placeMachine(MachineType type, int row, int col) {
+    // 1. Check if the cell is within bounds.
+    if (row < 0 || row >= state.grid.length || col < 0 || col >= state.grid[0].length) return;
+
+    final existingMachine = state.grid[row][col];
+
+    // --- Handle In-Place Upgrades ---
+    if (existingMachine != null) {
+      final targetUpgradeType = _upgradePaths[existingMachine.type];
+      if (targetUpgradeType == type) {
+        // This is a valid upgrade attempt.
+        final t1Cost = machineCosts[existingMachine.type] ?? {};
+        final t2Cost = machineCosts[type] ?? {};
+        final upgradeCost = <ResourceType, int>{};
+
+        // Calculate the difference in cost
+        t2Cost.forEach((resource, t2Amount) {
+          final t1Amount = t1Cost[resource] ?? 0;
+          if (t2Amount > t1Amount) {
+            upgradeCost[resource] = t2Amount - t1Amount;
+          }
+        });
+
+        if (_canAfford(upgradeCost, 'a ${type.name} upgrade')) {
+          final newInventory = _deductCost(upgradeCost);
+          final newGrid = state.grid.map((rowList) => List<Machine?>.from(rowList)).toList();
+          // Preserve the state of the old machine (direction, buffers, etc.)
+          newGrid[row][col] = existingMachine.copyWith(type: type);
+
+          state = state.copyWith(
+            grid: newGrid,
+            inventory: newInventory,
+            lastMessage: 'Upgraded ${existingMachine.type.name} to ${type.name}!',
+          );
+        }
+        return; // End the function whether upgrade succeeded or failed
+      }
+      // If it's not a valid upgrade, do nothing and let the user know.
+      state = state.copyWith(lastMessage: 'Cannot place machine here.');
+      return;
+    }
+
+    // --- Handle Placing a New Machine on an empty tile ---
     final cost = machineCosts[type];
     if (cost == null || !_canAfford(cost, 'a ${type.name}')) return;
 
-    // 3. Create the new state components.
+    // Special check for power pole
+    if (type == MachineType.powerPole && !state.unlockedResearch.contains(ResearchType.copperProcessing)) {
+      state = state.copyWith(lastMessage: 'Cannot build Power Pole without Copper Processing for wires.');
+      return;
+    }
+    if (type == MachineType.trainStop && _getRailAt(row, col) == null) {
+      state = state.copyWith(lastMessage: 'Train Stops must be placed on rails.');
+      return;
+    }
     final newInventory = _deductCost(cost);
 
-    final newMachine = Machine(type: type, row: row, col: col);
+    var newMachine = Machine(type: type, row: row, col: col);
+    if (type == MachineType.droneStation) {
+      newMachine = newMachine.copyWith(droneStationData: const DroneStationData());
+    }
+    if (type == MachineType.trainStop) {
+      newMachine = newMachine.copyWith(trainStopData: const TrainStopData());
+    }
     final newGrid = state.grid.map((rowList) => List<Machine?>.from(rowList)).toList();
     newGrid[row][col] = newMachine;
 
-    // 4. Update the state.
     state = state.copyWith(
       grid: newGrid,
       inventory: newInventory,
     );
+  }
+
+  /// Places the Factory Core on the grid.
+  void placeFactoryCore(int row, int col) {
+    // 1. Check if the 3x3 area is within bounds and empty.
+    if (row < 0 || row + factoryCoreSize > state.grid.length || col < 0 || col + factoryCoreSize > state.grid[0].length) return;
+
+    for (int r = row; r < row + factoryCoreSize; r++) {
+      for (int c = col; c < col + factoryCoreSize; c++) {
+        if (state.grid[r][c] != null || state.conveyorGrid[r][c] != null) {
+          state = state.copyWith(lastMessage: 'Area is not clear to build the Factory Core.');
+          return;
+        }
+      }
+    }
+
+    // 2. Check if the player can afford it.
+    if (!_canAfford(factoryCorePlacementCost, 'the Factory Core')) return;
+
+    // 3. Create the new state components.
+    final newInventory = _deductCost(factoryCorePlacementCost);
+    final newCore = FactoryCoreState(row: row, col: col);
+
+    // 4. Update the state.
+    state = state.copyWith(factoryCore: newCore, inventory: newInventory);
   }
 
   /// Removes a machine from the grid.
@@ -410,6 +889,56 @@ class GameController extends _$GameController {
     state = state.copyWith(conveyorGrid: newGrid);
   }
 
+  /// Places a new pipe on the grid.
+  void placePipe(Direction direction, int row, int col) {
+    if (row < 0 || row >= state.pipeGrid.length || col < 0 || col >= state.pipeGrid[0].length) return;
+    if (state.pipeGrid[row][col] != null) return;
+
+    // 2. Check if player can afford it.
+    if (!_canAfford(pipeCost, 'a pipe')) return;
+
+    // 3. Create new state components.
+    final newInventory = _deductCost(pipeCost);
+
+    final newPipe = Pipe(direction: direction, row: row, col: col);
+    final newGrid = state.pipeGrid.map((rowList) => List<Pipe?>.from(rowList)).toList();
+    newGrid[row][col] = newPipe;
+
+    // 4. Update state.
+    state = state.copyWith(pipeGrid: newGrid, inventory: newInventory);
+  }
+
+  /// Removes a pipe from the grid.
+  void removePipe(int row, int col) {
+    if (row < 0 || row >= state.pipeGrid.length || col < 0 || col >= state.pipeGrid[0].length) return;
+    if (state.pipeGrid[row][col] == null) return;
+    final newGrid = state.pipeGrid.map((rowList) => List<Pipe?>.from(rowList)).toList();
+    newGrid[row][col] = null;
+    state = state.copyWith(pipeGrid: newGrid);
+  }
+
+  /// Places a new rail on the grid.
+  void placeRail(int row, int col) {
+    if (row < 0 || row >= state.railGrid.length || col < 0 || col >= state.railGrid[0].length) return;
+    if (state.railGrid[row][col] != null) return;
+    if (!_canAfford(railCost, 'a rail')) return;
+
+    final newInventory = _deductCost(railCost);
+    final newRail = Rail(row: row, col: col);
+    final newGrid = state.railGrid.map((rowList) => List<Rail?>.from(rowList)).toList();
+    newGrid[row][col] = newRail;
+    state = state.copyWith(railGrid: newGrid, inventory: newInventory);
+  }
+
+  /// Removes a rail from the grid.
+  void removeRail(int row, int col) {
+    if (row < 0 || row >= state.railGrid.length || col < 0 || col >= state.railGrid[0].length) return;
+    if (state.railGrid[row][col] == null) return;
+    final newGrid = state.railGrid.map((rowList) => List<Rail?>.from(rowList)).toList();
+    newGrid[row][col] = null;
+    state = state.copyWith(railGrid: newGrid);
+  }
+
   /// Rotates an existing conveyor on the grid.
   void rotateConveyor(int row, int col) {
     final conveyor = state.conveyorGrid[row][col];
@@ -442,20 +971,10 @@ class GameController extends _$GameController {
     state = state.copyWith(grid: newGrid);
   }
 
-  /// Cycles the output resource for a storage container.
-  void cycleStorageOutput(int row, int col) {
+  /// Sets the output resource for a storage container.
+  void setStorageOutput(int row, int col, ResourceType? newOutput) {
     final machine = state.grid[row][col];
     if (machine == null || machine.type != MachineType.storage) return;
-
-    final allResources = ResourceType.values;
-    final currentOutput = machine.configuredOutput;
-
-    // Find the index of the current selection.
-    final currentIndex = currentOutput == null ? -1 : allResources.indexOf(currentOutput);
-
-    // Cycle to the next resource, or to null (off) if at the end.
-    final nextIndex = currentIndex + 1;
-    final newOutput = nextIndex >= allResources.length ? null : allResources[nextIndex];
 
     final newGrid = state.grid.map((rowList) => List<Machine?>.from(rowList)).toList();
     newGrid[row][col] = machine.copyWith(configuredOutput: newOutput);
@@ -463,6 +982,20 @@ class GameController extends _$GameController {
     state = state.copyWith(
       grid: newGrid,
       lastMessage: 'Storage set to output: ${newOutput?.name ?? 'Nothing'}',
+    );
+  }
+
+  /// Sets the name for a train stop.
+  void setTrainStopName(int row, int col, String name) {
+    final machine = state.grid[row][col];
+    if (machine?.type != MachineType.trainStop || machine!.trainStopData == null) return;
+
+    final newGrid = state.grid.map((rowList) => List<Machine?>.from(rowList)).toList();
+    newGrid[row][col] = machine.copyWith(trainStopData: machine.trainStopData!.copyWith(stationName: name));
+
+    state = state.copyWith(
+      grid: newGrid,
+      lastMessage: 'Train Stop renamed to "$name".',
     );
   }
 
@@ -474,6 +1007,135 @@ class GameController extends _$GameController {
   /// Sets the player's currently selected tool.
   void selectTool(Tool tool) {
     state = state.copyWith(selectedTool: tool);
+  }
+
+  /// Unlocks a research item if the player has enough points and meets prerequisites.
+  void unlockResearch(ResearchType type) {
+    final research = allResearch[type];
+    if (research == null) return;
+
+    // 1. Check if already unlocked
+    if (state.unlockedResearch.contains(type)) {
+      state = state.copyWith(lastMessage: 'Already researched ${research.name}.');
+      return;
+    }
+
+    // 2. Check for prerequisites
+    if (!state.unlockedResearch.containsAll(research.prerequisites)) {
+      state = state.copyWith(lastMessage: 'Missing prerequisites for ${research.name}.');
+      return;
+    }
+
+    // 3. Check cost
+    if (state.points < research.cost) {
+      state = state.copyWith(lastMessage: 'Not enough points to research ${research.name}.');
+      return;
+    }
+
+    // 4. Unlock it
+    final newPoints = state.points - research.cost;
+    final newUnlocked = Set<ResearchType>.from(state.unlockedResearch)..add(type);
+
+    // --- Handle specific research effects ---
+    var nextMachineGrid = state.grid;
+    var nextConveyorGrid = state.conveyorGrid;
+    var nextResourceGrid = state.resourceGrid;
+
+    if (type == ResearchType.landExpansion) {
+      final currentHeight = state.grid.length;
+      final currentWidth = state.grid.isNotEmpty ? state.grid[0].length : 0;
+      final newHeight = currentHeight + 5;
+      final newWidth = currentWidth + 5;
+
+      // Create new larger grids, initialized with nulls
+      final expandedMachineGrid = List.generate(newHeight, (_) => List<Machine?>.filled(newWidth, null));
+      final expandedConveyorGrid = List.generate(newHeight, (_) => List<Conveyor?>.filled(newWidth, null));
+      final expandedResourceGrid = List.generate(newHeight, (_) => List<ResourceType?>.filled(newWidth, null));
+
+      // Copy old data
+      for (int r = 0; r < currentHeight; r++) {
+        for (int c = 0; c < currentWidth; c++) {
+          expandedMachineGrid[r][c] = state.grid[r][c];
+          expandedConveyorGrid[r][c] = state.conveyorGrid[r][c];
+          expandedResourceGrid[r][c] = state.resourceGrid[r][c];
+        }
+      }
+
+      // Generate resources in the new area
+      final random = Random();
+      for (int r = 0; r < newHeight; r++) {
+        for (int c = 0; c < newWidth; c++) {
+          if (r >= currentHeight || c >= currentWidth) {
+            // This is a new tile, generate a resource patch
+            final val = random.nextDouble();
+            if (val < 0.05) expandedResourceGrid[r][c] = ResourceType.ironOre;
+            else if (val < 0.1) expandedResourceGrid[r][c] = ResourceType.copperOre;
+            else if (val < 0.15) expandedResourceGrid[r][c] = ResourceType.coal;
+          }
+        }
+      }
+
+      nextMachineGrid = expandedMachineGrid;
+      nextConveyorGrid = expandedConveyorGrid;
+      nextResourceGrid = expandedResourceGrid;
+    }
+
+    state = state.copyWith(
+      points: newPoints,
+      unlockedResearch: newUnlocked,
+      lastMessage: 'Unlocked: ${research.name}!',
+      grid: nextMachineGrid,
+      conveyorGrid: nextConveyorGrid,
+      resourceGrid: nextResourceGrid,
+    );
+  }
+
+  /// Creates a new train on a rail tile.
+  void createTrain(int row, int col) {
+    if (_getRailAt(row, col) == null) return;
+    final newId = state.trains.length;
+    final newTrain = Train(id: newId, locomotivePosition: (row, col));
+    state = state.copyWith(trains: [...state.trains, newTrain]);
+  }
+
+  /// Builds a new drone at the specified station.
+  void createDrone(int stationRow, int stationCol) {
+    final machine = state.grid[stationRow][stationCol];
+    if (machine?.type != MachineType.droneStation) return;
+
+    if (_canAfford(droneCost, 'a Drone')) {
+      final newInventory = _deductCost(droneCost);
+      final newGrid = state.grid.map((rowList) => List<Machine?>.from(rowList)).toList();
+
+      final stationData = machine!.droneStationData ?? const DroneStationData();
+      final newDrones = List<Drone>.from(stationData.drones)..add(const Drone());
+
+      newGrid[stationRow][stationCol] = machine.copyWith(droneStationData: stationData.copyWith(drones: newDrones));
+
+      state = state.copyWith(grid: newGrid, inventory: newInventory, lastMessage: 'Drone constructed.');
+    }
+  }
+
+  /// Sends a drone from a station on an exploration mission.
+  void sendDroneToExplore(int stationRow, int stationCol, int droneIndex) {
+    final machine = state.grid[stationRow][stationCol];
+    if (machine?.type != MachineType.droneStation || machine!.droneStationData == null) return;
+
+    final stationData = machine.droneStationData!;
+    if (droneIndex < 0 || droneIndex >= stationData.drones.length) return;
+
+    final drone = stationData.drones[droneIndex];
+    if (drone.status == DroneStatus.idle) {
+      final newGrid = state.grid.map((rowList) => List<Machine?>.from(rowList)).toList();
+      final newDrones = List<Drone>.from(stationData.drones);
+      newDrones[droneIndex] = drone.copyWith(status: DroneStatus.exploring, ticksRemaining: 60);
+
+      newGrid[stationRow][stationCol] = machine.copyWith(droneStationData: stationData.copyWith(drones: newDrones));
+
+      state = state.copyWith(grid: newGrid, lastMessage: 'Drone dispatched for exploration.');
+    } else {
+      state = state.copyWith(lastMessage: 'Drone is already exploring.');
+    }
   }
 
   // --- Private Helper Methods ---
@@ -527,6 +1189,40 @@ class GameController extends _$GameController {
     return null;
   }
 
+  Rail? _getRailAt(int r, int c) {
+    if (r >= 0 && r < state.railGrid.length && c >= 0 && c < state.railGrid[0].length) {
+      return state.railGrid[r][c];
+    }
+    return null;
+  }
+
+  Pipe? _getPipeAt((int, int) coords) {
+    final r = coords.$1;
+    final c = coords.$2;
+    if (r >= 0 && r < state.pipeGrid.length && c >= 0 && c < state.pipeGrid[0].length) {
+      return state.pipeGrid[r][c];
+    }
+    return null;
+  }
+
+  Conveyor? _getConveyorAt((int, int) coords) {
+    final r = coords.$1;
+    final c = coords.$2;
+    if (r >= 0 && r < state.conveyorGrid.length && c >= 0 && c < state.conveyorGrid[0].length) {
+      return state.conveyorGrid[r][c];
+    }
+    return null;
+  }
+
+  Machine? _getMachineAt((int, int) coords) {
+    final r = coords.$1;
+    final c = coords.$2;
+    if (r >= 0 && r < state.grid.length && c >= 0 && c < state.grid[0].length) {
+      return state.grid[r][c];
+    }
+    return null;
+  }
+
   Direction _getClockwiseDirection(Direction dir) {
     const clockwiseMap = {
       Direction.up: Direction.right,
@@ -556,5 +1252,175 @@ class GameController extends _$GameController {
       return grid[r][c] != null && grid[r][c]?.resource == null;
     }
     return false;
+  }
+
+  List<Recipe> _getRecipesForMachine(MachineType type) {
+    switch (type) {
+      case MachineType.smelter:
+        return smelterRecipes;
+      case MachineType.smelterT2:
+        return smelterRecipesT2;
+      case MachineType.assembler:
+        return assemblerRecipes;
+      case MachineType.refinery:
+        return refineryRecipes;
+      case MachineType.chemicalPlant:
+        return chemicalPlantRecipes;
+      case MachineType.assemblerT2:
+        return assemblerRecipesT2;
+      default:
+        return [];
+    }
+  }
+
+  void _handleResourceExtraction(int r, int c, Machine machine, List<List<Machine?>> nextMachineGrid) {
+    if (machine.outputBuffer != null || machine.fluidOutputBuffer.isNotEmpty) return;
+
+    final recipe = allRecipes[machine.type]!;
+    final producedResource = recipe.outputs.keys.first;
+    final tileResource = state.resourceGrid[r][c];
+
+    bool canMine = false;
+    if (machine.type == MachineType.oilDerrick && tileResource == ResourceType.oilSeep) {
+      canMine = true;
+    } else if (machine.type == MachineType.offshorePump && tileResource == ResourceType.water) {
+      canMine = true;
+    } else if (producedResource == tileResource) {
+      canMine = true;
+    }
+
+    if (canMine) {
+      int newProgress = machine.productionProgress + 1;
+      if (newProgress >= recipe.productionTime) {
+        newProgress = 0;
+        final outputAmount = recipe.outputs.values.first;
+        if (producedResource.isFluid) {
+          nextMachineGrid[r][c] = machine.copyWith(
+            productionProgress: newProgress,
+            fluidOutputBuffer: {producedResource: outputAmount},
+          );
+        } else {
+          nextMachineGrid[r][c] = machine.copyWith(
+            productionProgress: newProgress,
+            outputBuffer: producedResource,
+          );
+        }
+      } else {
+        nextMachineGrid[r][c] = machine.copyWith(productionProgress: newProgress);
+      }
+    }
+  }
+
+  void _handleRecipeProduction(int r, int c, Machine machine, List<List<Machine?>> nextMachineGrid) {
+    final possibleRecipes = _getRecipesForMachine(machine.type);
+    if (possibleRecipes.isEmpty || machine.outputBuffer != null || machine.fluidOutputBuffer.isNotEmpty) return;
+
+    if (machine.productionProgress == 0) {
+      // --- Try to start a new production ---
+      for (int i = 0; i < possibleRecipes.length; i++) {
+        final recipeToTry = possibleRecipes[i];
+        if (_canProduceRecipe(recipeToTry, machine)) {
+          final newInputBuffer = _consumeSolidInputs(recipeToTry, machine);
+          final newFluidInputBuffer = _consumeFluidInputs(recipeToTry, machine);
+          final newProgress = (i * 1000) + 1;
+          nextMachineGrid[r][c] = machine.copyWith(inputBuffer: newInputBuffer, fluidInputBuffer: newFluidInputBuffer, productionProgress: newProgress);
+          return; // Start producing and exit
+        }
+      }
+    } else {
+      // --- Continue existing production ---
+      final recipeIndex = machine.productionProgress ~/ 1000;
+      final currentProgress = machine.productionProgress % 1000;
+
+      if (recipeIndex < possibleRecipes.length) {
+        final activeRecipe = possibleRecipes[recipeIndex];
+        final newProgress = currentProgress + 1;
+
+        if (newProgress >= activeRecipe.productionTime) {
+          final outputResource = activeRecipe.outputs.keys.first;
+          final outputAmount = activeRecipe.outputs.values.first;
+          if (outputResource.isFluid) {
+            nextMachineGrid[r][c] = machine.copyWith(productionProgress: 0, fluidOutputBuffer: {outputResource: outputAmount});
+          } else {
+            nextMachineGrid[r][c] = machine.copyWith(productionProgress: 0, outputBuffer: outputResource);
+          }
+        } else {
+          nextMachineGrid[r][c] = machine.copyWith(productionProgress: (recipeIndex * 1000) + newProgress);
+        }
+      } else {
+        nextMachineGrid[r][c] = machine.copyWith(productionProgress: 0);
+      }
+    }
+  }
+
+  bool _canProduceRecipe(Recipe recipe, Machine machine) {
+    bool canProduce = true;
+    for (final entry in recipe.inputs.entries) {
+      if (entry.key.isFluid) {
+        if ((machine.fluidInputBuffer[entry.key] ?? 0) < entry.value) canProduce = false;
+      } else {
+        if ((machine.inputBuffer[entry.key] ?? 0) < entry.value) canProduce = false;
+      }
+    }
+    return canProduce;
+  }
+
+  Map<ResourceType, int> _consumeSolidInputs(Recipe recipe, Machine machine) {
+    final newInputs = Map<ResourceType, int>.from(machine.inputBuffer);
+    recipe.inputs.forEach((key, value) => {if (!key.isFluid) newInputs.update(key, (v) => v - value)});
+    return newInputs;
+  }
+
+  Map<ResourceType, int> _consumeFluidInputs(Recipe recipe, Machine machine) {
+    final newInputs = Map<ResourceType, int>.from(machine.fluidInputBuffer);
+    recipe.inputs.forEach((key, value) => {if (key.isFluid) newInputs.update(key, (v) => v - value)});
+    return newInputs;
+  }
+
+  Machine? _findStopByName(String name) {
+    for (final row in state.grid) {
+      for (final machine in row) {
+        if (machine != null && machine.type == MachineType.trainStop && machine.trainStopData?.stationName == name) {
+          return machine;
+        }
+      }
+    }
+    return null;
+  }
+
+  /// Finds a path between two points on the rail network using Breadth-First Search.
+  List<(int, int)>? _findPathOnRails((int, int) start, (int, int) end) {
+    final queue = <(int, int)>[start];
+    final visited = {start};
+    // A map to reconstruct the path: key is a node, value is the node that led to it.
+    final cameFrom = <(int, int), (int, int)>{};
+
+    while (queue.isNotEmpty) {
+      final current = queue.removeAt(0);
+
+      if (current == end) {
+        // Path found, reconstruct it.
+        final path = <(int, int)>[];
+        var step = end;
+        while (step != start) {
+          path.insert(0, step);
+          step = cameFrom[step]!;
+        }
+        return path;
+      }
+
+      // Check neighbors (up, down, left, right)
+      for (final dir in Direction.values) {
+        final neighbor = _getCoordsForDirection(current.$1, current.$2, dir);
+        if (!visited.contains(neighbor) && _getRailAt(neighbor.$1, neighbor.$2) != null) {
+          visited.add(neighbor);
+          cameFrom[neighbor] = current;
+          queue.add(neighbor);
+        }
+      }
+    }
+
+    // No path found
+    return null;
   }
 }
